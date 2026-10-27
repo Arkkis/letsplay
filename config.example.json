@@ -1,0 +1,28 @@
+{
+ "channel": "YourName",
+ "vod_dir": "~/Videos/TwitchVods",
+ "vod_name_pattern": "^\\[(?P<m>\\d+)-(?P<d>\\d+)-(?P<y>\\d+)\\]\\s*(?:YourName\\s*-\\s*)?(?P<title>.*)$",
+ "language": "en",
+ "translation": null,
+ "edit_ratio": 0.87,
+ "text": {
+  "next_episode": "NEXT EPISODE",
+  "playlist": "PLAYLIST",
+  "subscribe": "SUBSCRIBE",
+  "to_be_continued": "TO BE CONTINUED...",
+  "the_end": "THE END",
+  "coming_next": "PART {n} COMING",
+  "thanks": "THANKS FOR WATCHING",
+  "episode": "PART {n}",
+  "episode_title": "{series} - Part {n}",
+  "full_episode": "FULL EPISODE: {episode}",
+  "from_stream": "from a Twitch stream",
+  "short_description": "Full episode: {output} {link}",
+  "and": "and",
+  "music": "Music: {songs} – Kevin MacLeod (incompetech.com)",
+  "license": "License: Creative Commons: By Attribution 4.0 – http://creativecommons.org/licenses/by/4.0/",
+  "sfx": "Sound effects: Kenney (kenney.nl), CC0"
+ },
+ "translation_text": null,
+ "subtitle_name": "English"
+}

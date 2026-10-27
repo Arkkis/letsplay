@@ -1,0 +1,8 @@
+{
+ "hype": {"accent": "#9146FF", "accent2": "#c79bff", "highlight": "#FFD60A", "soft": "#d9ccf5", "captionFont": "luckiest", "glitch": true,
+  "intro": "funk", "outro": "elevator", "introVolume": 0.5, "music": ["Funk Game Loop", "Local Forecast - Elevator"]},
+ "horror": {"accent": "#B3001B", "accent2": "#ff4d5e", "highlight": "#F2E8D5", "soft": "#e6c9c9", "captionFont": "anton", "glitch": true,
+  "intro": "darkest-child", "outro": "ossuary", "introVolume": 0.6, "music": ["Darkest Child", "Ossuary 6 - Air"]},
+ "chill": {"accent": "#2A9D8F", "accent2": "#8fd9cf", "highlight": "#FFD166", "soft": "#d8efe9", "captionFont": "luckiest", "glitch": false,
+  "intro": "carefree", "outro": "lobby-time", "introVolume": 0.45, "music": ["Carefree", "Lobby Time"]}
+}

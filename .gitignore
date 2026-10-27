@@ -1,0 +1,18 @@
+# media and per-VOD data (large, and the streamer's own material)
+footage/
+parts/
+out/
+work/
+.tmp/
+public/*.mp4
+public/music/*.mp3
+# the channel's own settings and episode edits
+config.json
+edits/*.json
+# generated from ChaosModV (GPL-3.0) by games/chaosmod/build_names.py
+games/chaosmod/names.json
+# environments
+.venv/
+node_modules/
+__pycache__/
+*.pyc

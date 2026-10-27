@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "youtube": {
+      "command": ".venv/bin/python",
+      "args": ["scripts/youtube_mcp.py"]
+    }
+  }
+}
