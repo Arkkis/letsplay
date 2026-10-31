@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python scripts/lp.py prep *)",
+      "Bash(.venv/bin/python scripts/lp.py draft *)",
+      "Bash(.venv/bin/python scripts/lp.py context *)",
+      "Bash(.venv/bin/python scripts/lp.py frames *)",
+      "Bash(.venv/bin/python scripts/lp.py faces *)",
+      "Bash(.venv/bin/python scripts/lp.py check *)",
+      "Bash(.venv/bin/python scripts/lp.py script *)",
+      "Bash(.venv/bin/python scripts/lp.py render *)",
+      "Bash(.venv/bin/python scripts/lp.py shorts *)",
+      "Edit(edits/**)",
+      "Edit(games/chaosmod/descriptions.*.json)"
+    ],
+    "deny": [
+      "Bash(*lp.py publish*)",
+      "mcp__youtube"
+    ]
+  }
+}

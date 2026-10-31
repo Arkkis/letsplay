@@ -94,6 +94,36 @@ Measured: episode 3 in a fresh session took 47 min wall time (11 min editing, 18
 Keep the context small: read the context file once; don't `cat` whole reference EDLs (the schema below is enough);
 look at contact sheets only as often as needed (every image stays in the context for the rest of the session).
 
+## Model per task (optional)
+
+Not the default: make an episode in one Opus session as above unless the user asks for this. A replay of episode 3's token log
+at API prices put this setup at −4.8% ($3.17 vs $3.33), so it isn't worth the extra sessions for cost alone.
+
+An episode can run with each kind of task on its own model through `/orchestrate`. The fresh episode session (the recipe
+above with `--model opus`) is both editor and orchestrator, so workers' `ASK:` messages reach the session that knows the episode.
+`ingest`, `split` and `prep all` run once per VOD before it starts. This table replaces orchestrate's "lowest tier that can do a piece".
+
+| Model | Tasks | Steps |
+|---|---|---|
+| Haiku | Run `draft`, `context`, `render`, `render --patch`; report file, length, LUFS. No decisions, never edits the EDL | 3.1, 3.2, 3.8 |
+| Sonnet | Missing effect descriptions, the translation block, a thumbnail shortlist from `faces`/`frames` (3 of each with times), fixing what `check` reports | parts of 3.3, 3.5, 3.6 |
+| Opus (the episode session) | Cuts, cold open, intro, captions, zooms, chapters, Shorts, title, description, final thumbnail and hook, the `script` review, verifying the render, `publish` after the user's go | the rest of 3.3, 3.4, 3.5, 3.7, 4, 5 |
+
+Order: Haiku `draft` + `context` → Opus writes the editorial EDL → Sonnet's tasks → Opus picks the thumbnail, reviews with `script`
+and runs `check` again after its own fixes → Haiku `render` → Opus verifies.
+
+- Start each worker with `n=$(SPAWN_FLAGS="--settings .claude/orchestrate-worker.json" ~/.claude/skills/orchestrate/acquire.sh <model> auto <you> $PWD)`:
+  the `lp.py` steps are pre-allowed, `lp.py publish` and YouTube are denied. A command outside the list goes to the auto-mode
+  classifier; if a worker goes quiet, `peek.sh <name>` shows why, and a refused routine command belongs in that file.
+- Only one session touches the EDL at a time. Sonnet changes only effect descriptions, the translation block and the fields `check`
+  reports. Editorial fields are Opus's; Sonnet reports a problem it can't fix without changing one.
+- Workers run long steps in the background. Only `DONE:` means finished: skip `wait.sh`, ignore idle notifications, and run `peek.sh`
+  if no `DONE:` has arrived after 90 min (a timeout must not start a second render). Fixes after a render are `--patch`.
+- Editorial calls are the editor's, so workers don't escalate them. `$DECISIONS` is shared across VODs: series-wide rulings only.
+- Verify a `DONE:` yourself: `lp.py check` output, `ffprobe` length against the worker's report, `ffmpeg -i <mp4> -af ebur128=framelog=quiet -f null -`
+  for about −14 LUFS, and a look at the thumbnail. `edits/` and `out/` are gitignored, so there is no diff to read.
+- No `--worktree`: footage, work files, edits, config and environments are all gitignored. End with `~/.claude/skills/orchestrate/release.sh --orch <you> $PWD`.
+
 ## Pick the kind of video first
 
 Decide per VOD from its title and a look at `frames`/`context`:
