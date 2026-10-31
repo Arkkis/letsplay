@@ -16,7 +16,7 @@ const STYLE = styles[edit.style as keyof typeof styles];
 const HEAD = STYLE.headline;
 const W = 1920, H = 1080;
 // On-screen words in the channel's language (config.json via build_edit.py).
-const TEXT = (edit as {text?: Record<string, string>}).text ?? {effect_label: '', next_episode: '', playlist: ''};
+const TEXT = (edit as {text?: Record<string, string>}).text ?? {effect_label: '', next_episode: '', playlist: '', chapter: ''};
 const cam = edit.cam as number[] | null; // null when the stream has no webcam (then there are no face zooms)
 const FACE = cam ? {x: cam[0] + cam[2] / 2, y: cam[1] + cam[3] / 2} : {x: W / 2, y: H / 2};
 const src = staticFile(edit.source);
@@ -25,9 +25,16 @@ const music = (name: string) => staticFile(`music/${name}.mp3`);
 const FILL: React.CSSProperties = {width: '100%', height: '100%'};
 const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 
-type Clip = (typeof edit.clips)[number];
+// A clip of the prepared source (or of `file`: the recap's own cut). `jump`: alternate slight punch-in across a jump cut.
+// `lead`: J-cut, the audio starts this many frames before the picture. Every cut gets an audio crossfade of `xfade` frames.
+type Clip = {section: string; src: number; dur: number; from: number; rate?: number; whoosh?: boolean; jump?: boolean; lead?: number; file?: string};
 type Zoom = (typeof edit.faceZooms)[number];
-const rate = (c: Clip) => (c as {rate?: number}).rate ?? 1; // fast-forward (>1) or slow motion (<1)
+type Card = {at: number; dur: number; n: number; label: string};
+type Bed = {track: string; talk: number[][]};
+const clips = edit.clips as Clip[];
+const extra = edit as {xfade?: number; cards?: Card[]; bed?: Bed | null; recap?: {text: string; sub: string} | null};
+const XFADE = extra.xfade ?? 0;
+const rate = (c: Clip) => c.rate ?? 1; // fast-forward (>1) or slow motion (<1)
 
 // Envelope 0→1→0 for a timed effect: ease in, hold, ease out.
 const envelope = (f: number, at: number, inF: number, hold: number, outF: number) =>
@@ -35,19 +42,47 @@ const envelope = (f: number, at: number, inF: number, hold: number, outF: number
 		...clamp, easing: Easing.bezier(0.33, 1, 0.68, 1),
 	});
 
+// Rendered from `lead` frames before the cut (picture hidden, audio fading in) to `xfade` frames after its end (audio
+// fading out under the next clip, picture covered by it).
 const ClipView: React.FC<{clip: Clip}> = ({clip}) => {
 	const f = useCurrentFrame();
-	const t = clip.whoosh ? interpolate(f, [0, 14], [1, 0], {...clamp, easing: Easing.out(Easing.cubic)}) : 0;
+	const lead = clip.lead ?? 0;
+	const t = clip.whoosh ? interpolate(f - lead, [0, 14], [1, 0], {...clamp, easing: Easing.out(Easing.cubic)}) : 0;
 	return (
-		<AbsoluteFill style={{transform: `scale(${1 + 0.14 * t})`, filter: t > 0.01 ? `blur(${14 * t}px)` : undefined}}>
+		<AbsoluteFill style={{transform: `scale(${(1 + 0.14 * t) * (clip.jump ? 1.05 : 1)})`, filter: t > 0.01 ? `blur(${14 * t}px)` : undefined,
+			opacity: f < lead ? 0 : 1}}>
 			<OffthreadVideo style={FILL}
-				src={src}
-				trimBefore={clip.src}
+				src={clip.file ? staticFile(clip.file) : src}
+				trimBefore={clip.src - lead}
 				playbackRate={rate(clip)}
-				volume={(vf) => interpolate(vf, [0, 3, clip.dur - 3, clip.dur], [0, 1, 1, 0], clamp) * (rate(clip) > 1 ? 0.3 : 1)}
+				volume={(vf) => interpolate(vf, [0, lead + XFADE, lead + clip.dur, lead + clip.dur + XFADE], [0, 1, 1, 0], clamp) * (rate(clip) > 1 ? 0.3 : 1)}
 			/>
 		</AbsoluteFill>
 	);
+};
+
+// Chapter card where a chapter starts, in the lower third's spot.
+const ChapterCard: React.FC<{card: Card}> = ({card}) => (
+	<Stack dur={card.dur} style={{bottom: 330, left: 80}} lines={[
+		{text: TEXT.chapter?.replace('{n}', String(card.n)) ?? '', color: CYAN, size: 44}, {text: card.label, color: HEAD, size: 96},
+	]} />
+);
+
+// "Previously" tag over the recap clips.
+const RecapTag: React.FC<{dur: number}> = ({dur}) => (
+	<Stack dur={dur} style={{top: 230, left: 80}} lines={[{text: extra.recap!.text, color: HEAD, size: 96}, {text: extra.recap!.sub, color: CYAN, size: 44}]} />
+);
+
+// Music bed under the main part: low, ducked lower while someone talks (speech stretches in output frames).
+const DUCK = 0.4;
+const bedVolume = (bed: Bed, base: number, from: number) => (f: number) => {
+	const g = f + from;
+	let duck = 0;
+	for (const [a, b] of bed.talk) {
+		if (g < a - 8) break;
+		duck = Math.max(duck, Math.min(1, (g - (a - 8)) / 8) * Math.min(1, ((b + 12) - g) / 12));
+	}
+	return base * (1 - (1 - DUCK) * Math.max(0, duck));
 };
 
 // Punch-ins: face zooms push toward the webcam, game zooms push to centre, audio punches (loud rises) kick briefly with a
@@ -209,19 +244,27 @@ export const LetsPlay: React.FC = () => {
 	return (
 		<AbsoluteFill style={{background: 'black'}}>
 			<Zoomer>
-				{edit.clips.map((c, i) => (
-					<Sequence key={i} from={c.from} durationInFrames={c.dur} premountFor={90}>
+				{clips.map((c, i) => (
+					<Sequence key={i} from={c.from - (c.lead ?? 0)} durationInFrames={(c.lead ?? 0) + c.dur + XFADE} premountFor={90}>
 						<ClipView clip={c} />
 					</Sequence>
 				))}
 			</Zoomer>
+			{extra.recap && (
+				<Sequence from={0} durationInFrames={clips.filter((c) => c.section === 'recap').reduce((s, c) => s + c.dur, 0)}>
+					<RecapTag dur={clips.filter((c) => c.section === 'recap').reduce((s, c) => s + c.dur, 0)} />
+				</Sequence>
+			)}
+			{(extra.cards ?? []).map((c, i) => (
+				<Sequence key={`card${i}`} from={c.at} durationInFrames={c.dur}><ChapterCard card={c} /></Sequence>
+			))}
 			{edit.effects.map((e, i) => (
 				<Sequence key={`fx${i}`} from={e.at} durationInFrames={212}><EffectBadge name={e.name} fi={e.fi} /></Sequence>
 			))}
 			{edit.captions.map((c, i) => (
 				<Sequence key={`cap${i}`} from={c.at} durationInFrames={c.dur ?? 132}><Caption text={c.text} words={c.words} dur={c.dur ?? 132} i={i} slot={c.slot ?? 0} /></Sequence>
 			))}
-			{edit.clips.filter((c) => rate(c) !== 1).map((c, i) => (
+			{clips.filter((c) => rate(c) !== 1).map((c, i) => (
 				<Sequence key={`sp${i}`} from={c.from} durationInFrames={c.dur}><SpeedBadge rate={rate(c)} dur={c.dur} /></Sequence>
 			))}
 			<Sequence from={lowerThird.from} durationInFrames={lowerThird.dur}><LowerThird /></Sequence>
@@ -236,14 +279,25 @@ export const LetsPlay: React.FC = () => {
 			<Sequence from={end.from} durationInFrames={end.dur}>
 				<Audio src={music(STYLE.outro)} volume={(f) => interpolate(f, [0, 20, end.dur - 40, end.dur], [0, 0.4, 0.4, 0], clamp)} />
 			</Sequence>
+			{extra.bed && (
+				<Sequence from={edit.introEnd} durationInFrames={freeze.from - edit.introEnd}>
+					<Audio src={music(extra.bed.track)} loop volume={(f) => {
+						const v = bedVolume(extra.bed!, (STYLE as {bedVolume?: number}).bedVolume ?? 0.08, edit.introEnd)(f);
+						return v * interpolate(f, [0, 90, freeze.from - edit.introEnd - 60, freeze.from - edit.introEnd], [0, 1, 1, 0], clamp);
+					}} />
+				</Sequence>
+			)}
 
 			{/* Sound design */}
 			<Sequence from={title.from - 96}><Audio src={sfx('riser')} volume={0.3} /></Sequence>
 			{STYLE.glitch && [0, 4, 9].map((d) => <Sequence key={`gl${d}`} from={title.from + d}><Audio src={sfx('glitch')} volume={0.5} /></Sequence>)}
 			<Sequence from={title.from}><Audio src={sfx('hit')} volume={0.7} /></Sequence>
 			<Sequence from={freeze.from + 8}><Audio src={sfx('hit')} volume={0.7} /></Sequence>
-			{edit.clips.filter((c) => c.whoosh).map((c, i) => (
+			{clips.filter((c) => c.whoosh).map((c, i) => (
 				<Sequence key={`wh${i}`} from={c.from - 20}><Audio src={sfx('whoosh')} volume={0.35} /></Sequence>
+			))}
+			{(extra.cards ?? []).map((c, i) => (
+				<Sequence key={`cp${i}`} from={c.at}><Audio src={sfx('pop')} volume={0.4} /></Sequence>
 			))}
 			{edit.faceZooms.map((z, i) => (
 				<Sequence key={`bm${i}`} from={z.at - 4}><Audio src={sfx('hit')} volume={0.5} /></Sequence>

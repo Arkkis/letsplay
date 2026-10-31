@@ -2,32 +2,38 @@
 the render's input props; src/edit.json and src/thumb.json are only a neutral example for type-checking and Studio)
 plus a YouTube description with chapters (out/<playlist>/<name>.description.txt).
 
-Ranges are trimmed to speech + loud game moments unless flagged "full" (or the EDL has "mode": "speedrun");
-silences longer than trimming.MERGE_GAP are jump-cut. A speed flag ("x4" fast-forward, "x0.5" slow motion) keeps the range
-whole and plays it at that rate.
+Ranges are trimmed to speech, loud game moments, visual action and audio events (laughs, screams) unless flagged "full"
+(or the EDL has "mode": "speedrun"); silences longer than trimming.MERGE_GAP are jump-cut. A speed flag ("x4"
+fast-forward, "x0.5" slow motion) keeps the range whole and plays it at that rate.
 Times in the EDL are VOD times (m:ss or h:mm:ss). The prepared episode source (public/<vod>-ep<n>.mp4, made by
 `lp.py prep`) starts at the episode's part start, so source frames are offset by it.
 """
-import json, os, re, sys
+import hashlib, json, os, re, subprocess, sys
 from difflib import SequenceMatcher
 import numpy as np
-from trimming import loud_db, trim
+from media import GRADE, video_encoder
+from trimming import loud_db, merge, motion_thr, real_words, trim
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.config import CFG, out_dir, text, translation_text
+from scripts.config import CFG, about_partner, out_dir, text, translation_text
 
 FPS = 60
 SKIP_TRANSITION = 45  # source seconds skipped before a whoosh transition is used
-TITLE_S, LOWER_THIRD_S = 3.5, 5
+TITLE_S, LOWER_THIRD_S, CARD_S = 3.5, 5, 3.5
 CAPTION_F, ZOOM_HOLD_F, ZOOM_SPACING_F, EFFECT_SEARCH_S = 132, 110, 240, 30
 WORD_F = 7  # caption word cadence when a word can't be matched to speech
 PUNCH_SPACING_F, PUNCH_RISE_DB = 15 * FPS, 10  # audio-reactive punch-ins: at most one per 15 s, on a sharp loudness rise
+XFADE_F, LEAD_F = 5, 9  # audio crossfade over every cut; J-cut lead when the next clip opens with speech
+TALK_GAP, TALK_PAD = 0.6, 0.25  # music bed ducking: speech stretches merged and padded (seconds)
 
 edl = json.load(open(sys.argv[1]))
 work = f"work/{edl['vod']}"
 segments = json.load(open(f"{work}/transcript.json"))["segments"]
 words = [w for s in segments for w in s["words"]]
 rms = np.load(f"{work}/rms100ms.npy")
+said = real_words(words, rms)  # for subtitles: the trim keeps using every word so a ghost never changes a cut
 ocr_effects = json.load(open(f"{work}/effects.json")) if os.path.exists(f"{work}/effects.json") else []
+events = json.load(open(f"{work}/events.json")) if os.path.exists(f"{work}/events.json") else []
+motion = np.load(f"{work}/motion.npz")["game"] if os.path.exists(f"{work}/motion.npz") else None
 parts = json.load(open(f"{work}/parts.json"))
 part = parts[edl["episode"] - 1]
 OFF = part["prepStart"]  # VOD second where the prepared source begins
@@ -44,6 +50,7 @@ EFFECT_LABEL = edl.get("effectLabel", EFFECT_LABEL)  # hand-placed banners (no O
 style = json.load(open("src/styles.json"))[edl.get("style", "hype")]
 speedrun = edl.get("mode") == "speedrun"  # never jump-cut a run: every range is kept whole
 LOUD = edl.get("loudDb", loud_db(rms, part["start"], part["end"]))
+MOTION = (motion, motion_thr(motion, part["start"], part["end"])) if motion is not None else None
 
 
 def sec(t):
@@ -54,12 +61,14 @@ def sec(t):
 
 
 def word_safe(a, b):
-    """Never start or end inside a word: drop a word cut at the head, finish a word cut at the tail."""
-    for w in words:
-        if w["start"] < a < w["end"]:
-            a = w["end"] + 0.02
-        if w["start"] < b < w["end"]:
-            b = w["end"] + 0.12
+    """Never start or end inside a word: drop a word cut at the head, finish a word cut at the tail (one word only:
+    Whisper's words often abut, and stepping on through them would drop whole phrases)."""
+    w = next((w for w in words if w["start"] < a < w["end"]), None)
+    if w:
+        a = w["end"]
+    w = next((w for w in words if w["start"] < b < w["end"]), None)
+    if w:
+        b = w["end"] + 0.12
     return a, b
 
 
@@ -71,12 +80,48 @@ def add(section, ranges):
     for r in ranges:
         a, b = word_safe(sec(r[0]), sec(r[1]))
         rate = next((float(f[1:]) for f in r[2:] if f.startswith("x")), 1.0)
-        for x, y in ([[a, b]] if speedrun or rate != 1 or "full" in r[2:] else trim(words, rms, a, b, LOUD)):
+        for x, y in ([[a, b]] if speedrun or rate != 1 or "full" in r[2:] else trim(words, rms, a, b, LOUD, MOTION, events)):
             d = round((y - x) * FPS / rate)
             clips.append({"section": section, "src": round((x - OFF) * FPS), "dur": d, "from": cursor, **({"rate": rate} if rate != 1 else {})})
             cursor += d
 
 
+def recap_ranges():
+    """'Previously': the EDL's own ranges, or "auto" = the previous episode's cold open (VOD times, any part)."""
+    r = edl.get("recap")
+    if r == "auto":
+        prev = f"edits/{edl['vod']}-ep{edl['episode'] - 1}.json"
+        if not os.path.exists(prev):
+            sys.exit(f"recap \"auto\" needs the previous episode's EDL ({prev})")
+        r = [x[:2] for x in json.load(open(prev))["coldOpen"]]
+    return [[sec(a), sec(b)] for a, b in r] if r else []
+
+
+def recap_file(ranges):
+    """The recap's own graded source (public/<vod>-epN-recap.mp4): the ranges back to back, cut from the raw VOD,
+    because the prepared episode source only holds this episode's part. Rebuilt when the ranges change."""
+    name = f"{edl['vod']}-ep{edl['episode']}-recap.mp4"
+    key = hashlib.md5(json.dumps(ranges).encode()).hexdigest()[:8]
+    out, tag = f"public/{name}", f"public/{name}.{key}"
+    if not (os.path.exists(out) and os.path.exists(tag)):
+        inputs = [x for a, b in ranges for x in ("-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", f"footage/{edl['vod']}.mp4")]
+        graph = "".join(f"[{i}:v][{i}:a]" for i in range(len(ranges))) + f"concat=n={len(ranges)}:v=1:a=1[v0][a];[v0]{GRADE},fps={FPS}[v]"
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *inputs, "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
+                        *video_encoder(), "-g", "60", "-c:a", "aac", "-b:a", "256k", out], check=True)
+        for f in [f for f in os.listdir("public") if f.startswith(name + ".")]:
+            os.remove(f"public/{f}")
+        open(tag, "w").close()
+    return name
+
+
+recap = recap_ranges()
+if recap:
+    src_f, name = 0, recap_file(recap)
+    for a, b in recap:
+        d = round((b - a) * FPS)
+        clips.append({"section": "recap", "file": name, "src": src_f, "dur": d, "from": cursor})
+        src_f += d
+        cursor += d
 add("cold", edl["coldOpen"])
 title = {**edl["title"], "from": cursor, "dur": round(TITLE_S * FPS), "bg": round((sec(edl["title"]["bg"]) - OFF) * FPS)}
 cursor += title["dur"]
@@ -89,8 +134,20 @@ def span(c):
     return round(c["dur"] * c.get("rate", 1))
 
 
+def starts_with_speech(c):
+    t = c["src"] / FPS + OFF
+    return any(t <= w["start"] < t + 0.6 for w in words)
+
+
+jumps = 0
 for prev, c in zip(clips, clips[1:]):
-    c["whoosh"] = c["src"] - (prev["src"] + span(prev)) > SKIP_TRANSITION * FPS or c["section"] != prev["section"]
+    c["whoosh"] = "file" in c or "file" in prev or c["src"] - (prev["src"] + span(prev)) > SKIP_TRANSITION * FPS or c["section"] != prev["section"]
+    if not c["whoosh"] and c.get("rate", 1) == 1 and prev.get("rate", 1) == 1:
+        jumps += 1  # jump cut: alternate a slight punch-in so the cut reads as intended, and lead the audio in when speech opens the clip
+        if jumps % 2:
+            c["jump"] = True
+        if starts_with_speech(c) and c["src"] >= LEAD_F:
+            c["lead"] = LEAD_F
 
 
 def clip_at(f_out):
@@ -100,8 +157,8 @@ def clip_at(f_out):
 def frames(t, fast=True):
     """All output frames where source second t is shown (fast=False: not in fast-forwarded clips)."""
     f = (t - OFF) * FPS
-    return [c["from"] + round((f - c["src"]) / c.get("rate", 1)) for c in clips
-            if c["src"] <= f < c["src"] + span(c) and (fast or c.get("rate", 1) <= 1)]
+    return [c["from"] + round((f - c["src"]) / c.get("rate", 1)) for c in clips if "file" not in c
+            and c["src"] <= f < c["src"] + span(c) and (fast or c.get("rate", 1) <= 1)]
 
 
 def place(t, snap=0.0):
@@ -109,7 +166,7 @@ def place(t, snap=0.0):
     f = (t - OFF) * FPS
     hits = frames(t)
     if not hits and snap:
-        nxt = [c for c in clips if 0 < c["src"] - f <= snap * FPS]
+        nxt = [c for c in clips if "file" not in c and 0 < c["src"] - f <= snap * FPS]
         hits = [min(nxt, key=lambda c: c["src"])["from"]] if nxt else []
     if not hits:
         print(f"warning: {t:.1f}s is outside kept footage")
@@ -123,6 +180,11 @@ spk = json.load(open(spk_path))["segments"] if os.path.exists(spk_path) else [] 
 def guest_at(t):
     """True when the co-op partner is the one talking at VOD second t."""
     return any(x["spk"] == "guest" and x["start"] - 0.3 <= t < x["end"] + 0.3 for x in spk)
+
+
+def to_guest_at(t):
+    """True when the streamer is talking to the co-op partner about the partner's game at VOD second t (nothing of it on screen)."""
+    return bool(spk) and any(s["start"] - 0.3 <= t < s["end"] + 0.3 and not guest_at(s["start"]) and about_partner(s["text"]) for s in segments)
 
 
 def phrase_time(t, match):
@@ -177,13 +239,39 @@ effects = [{"at": f, "name": n, "fi": fi if fi and fi != "TODO" else (effects_li
 missing = []
 caption_times = [(phrase_time(sec(t), match), text) for t, match, text in edl["captions"]]
 missing += [f"chapter at {t} is still a draft label: {label}" for t, label in edl["chapters"] if label.startswith("TODO")]
+if edl["intro"] and edl["main"]:  # main must not go back inside the intro's span: the viewer would see those screens twice
+    intro_lo, intro_hi = min(sec(x[0]) for x in edl["intro"]), max(sec(x[1]) for x in edl["intro"])
+    missing += [f"main range {x[0]}–{x[1]} lies between the intro's ranges ({edl['intro'][0][0]}–{edl['intro'][-1][1]}): the episode "
+                "would rewind into the intro and show that stretch twice; drop the range or move it into the intro"
+                for x in edl["main"] if sec(x[0]) < intro_hi and sec(x[1]) > intro_lo]
+    if sec(edl["main"][0][0]) < intro_lo:
+        print(f"warning: main starts at {edl['main'][0][0]}, before the intro ({edl['intro'][0][0]}): the intro is a later explanation "
+              "pulled forward, so make sure nothing before it is a menu or cutscene the viewer then sees twice")
 # Co-op: the partner's gameplay isn't in this stream, so nothing is put on their lines; the edit follows the streamer.
 missing += [f"caption '{txt}' is on a [GUEST] line: captions are for the streamer's own lines" for t, txt in caption_times if t is not None and guest_at(t)]
+missing += [f"caption '{txt}' is the streamer talking to the partner about the partner's game ([TO GUEST]): nothing of it is on screen"
+            for t, txt in caption_times if t is not None and to_guest_at(t)]
 missing += [f"banner '{n}' at {t} is on a [GUEST] line" for t, n, _ in edl["effects"] if guest_at(sec(t))]
+for t, label in edl["chapters"]:
+    if guest_at(sec(t)) or to_guest_at(sec(t)):
+        print(f"warning: chapter '{label}' at {t} starts on the partner's talk: make sure the label names what happens in this stream")
 for t in edl["faceZooms"]:
     if guest_at(sec(t)):
         print(f"warning: face zoom at {t} lands on a [GUEST] line: keep it only if the streamer's face itself is funny or strange there (look with frames)")
 missing += [f"effect '{n}' has no description" for _, n, fi in edl["effects"] if not (fi and fi != "TODO") and not (effects_lib and effects_lib.desc(n))]
+for k, sh in enumerate(edl.get("shorts", []), 1):
+    if len(sh.get("ranges", [0])) > 2:
+        missing.append(f"short {k}: at most two ranges (one internal cut)")
+TAIL_S = 0.3  # Whisper's last word often ends early: a range ending within this of a word clips it
+fmt_t = lambda s: f"{int(s // 60)}:{s % 60:04.1f}"
+for what, rngs in [("cold open", [x[:2] for x in edl["coldOpen"]])] + [(f"short {k}", sh.get("ranges") or [[sh["from"], sh["to"]]])
+                                                                        for k, sh in enumerate(edl.get("shorts", []), 1)]:
+    for _, t in rngs:
+        b = sec(t)
+        near = [w for w in words if w["start"] - TAIL_S < b < w["end"] + TAIL_S]
+        if near:
+            print(f"warning: {what} ends at {t}, on or right after '{near[0]['word'].strip()}' ({fmt_t(near[0]['start'])}–{fmt_t(near[0]['end'])}): "
+                  f"leave ≥ {TAIL_S} s after the last word and before the next (word ends from Whisper run early; check the audio)")
 if missing:  # report every problem at once
     sys.exit("\n".join(missing))
 
@@ -243,23 +331,7 @@ def punches():
             if not any(x <= f < y for x, y in busy) and all(abs(f - p) >= PUNCH_SPACING_F for p in out):
                 out.append(f)
     return [{"at": f} for f in sorted(out)]
-out = {"fps": FPS, "duration": cursor, "source": f"{edl['vod']}-ep{edl['episode']}.mp4", "cam": cam,
-       "style": edl.get("style", "hype"), "clips": clips, "title": title, "introEnd": intro_end,
-       "freeze": freeze, "end": end, "lowerThird": {**edl["lowerThird"], "from": lt, "dur": LOWER_THIRD_S * FPS},
-       "effects": effects, "captions": captions, "faceZooms": face_zooms, "gameZooms": game_zooms,
-       "punches": punches(),
-       "text": {"effect_label": EFFECT_LABEL, "next_episode": text("next_episode" if edl["episode"] < len(parts) else "watch_next"), "playlist": text("playlist")}}
-th = edl["thumb"]
-thumb = {**th, "bg": round((sec(th["bg"]) - OFF) * FPS), "face": th.get("face") and round((sec(th["face"]) - OFF) * FPS)}
-json.dump({"edit": out, "thumb": thumb}, open(f"{work}/ep{edl['episode']}.props.json", "w"), ensure_ascii=False)
 
-def credit_lines(tr):
-    """Music and sound credits in the channel's language (tr=text) or the translation language (tr=translation_text)."""
-    songs = f" {tr('and')} ".join(f'"{m}"' for m in style["music"])
-    return "\n".join([tr("music", songs=songs), tr("license"), tr("sfx")])
-
-
-credits = (edl.get("credits") or credit_lines(text)).strip()
 
 # YouTube chapters: first must be 0:00, each at least 10 s apart. Keep the EDL index to pair English labels.
 chapters = [(0, 0)]
@@ -267,7 +339,55 @@ for i, (t, label) in enumerate(edl["chapters"][1:], 1):
     f = place(sec(t), snap=30)[0] if t not in ("end",) else end["from"]
     if f / FPS - chapters[-1][0] >= 10:
         chapters.append((f / FPS, i))
+    else:
+        print(f"warning: chapter '{label}' at {t} lands at {f / FPS:.1f} s, under 10 s after the previous one, and is dropped"
+              + (" (its time is inside the cold open: move it past that range)" if f < title["from"] else ""))
 fmt = lambda s: f"{int(s // 60)}:{int(s % 60):02}"
+
+# On-screen chapter cards where each chapter (after the first) starts, moved past a caption or the lower third if they
+# would overlap, dropped if that takes them more than 10 s into the chapter.
+cards = []
+if edl.get("chapterCards", True):
+    busy = [(c["at"], c["at"] + c["dur"]) for c in captions] + [(lt, lt + LOWER_THIRD_S * FPS)]
+    for s, i in chapters[1:]:
+        f = round(s * FPS)
+        for a, b in sorted(busy):
+            if a < f + CARD_S * FPS and f < b:
+                f = b + 10
+        if f - s * FPS <= 10 * FPS and f + CARD_S * FPS <= freeze["from"]:
+            cards.append({"at": f, "dur": round(CARD_S * FPS), "n": len(cards) + 2, "label": edl["chapters"][i][1]})
+        else:
+            print(f"warning: no chapter card for '{edl['chapters'][i][1]}' (no free spot in its first 10 s)")
+
+# Music bed under the main part, ducked under speech (styles.json "bed"; EDL "bed": false | true | "<track>").
+bed_track = edl.get("bed", True)
+bed_track = (style.get("bed") if bed_track is True else bed_track) or None
+bed = None
+if bed_track:
+    talk = merge([[c["from"] + (w["start"] - OFF - c["src"] / FPS) * FPS / c.get("rate", 1) - TALK_PAD * FPS,
+                   c["from"] + (w["end"] - OFF - c["src"] / FPS) * FPS / c.get("rate", 1) + TALK_PAD * FPS]
+                  for w in words for c in clips if "file" not in c and c["src"] <= (w["start"] - OFF) * FPS < c["src"] + span(c)], TALK_GAP * FPS)
+    bed = {"track": bed_track, "talk": [[round(a), round(b)] for a, b in talk]}
+
+out = {"fps": FPS, "duration": cursor, "source": f"{edl['vod']}-ep{edl['episode']}.mp4", "cam": cam,
+       "style": edl.get("style", "hype"), "clips": clips, "xfade": XFADE_F, "title": title, "introEnd": intro_end,
+       "freeze": freeze, "end": end, "lowerThird": {**edl["lowerThird"], "from": lt, "dur": LOWER_THIRD_S * FPS},
+       "effects": effects, "captions": captions, "faceZooms": face_zooms, "gameZooms": game_zooms,
+       "punches": punches(), "cards": cards, "bed": bed,
+       "recap": {"text": text("previously"), "sub": text("episode", n=edl["episode"] - 1)} if recap else None,
+       "text": {"effect_label": EFFECT_LABEL, "next_episode": text("next_episode" if edl["episode"] < len(parts) else "watch_next"),
+                "playlist": text("playlist"), "chapter": CFG["text"]["chapter"]}}
+th = edl["thumb"]
+thumb = {**th, "bg": round((sec(th["bg"]) - OFF) * FPS), "face": th.get("face") and round((sec(th["face"]) - OFF) * FPS)}
+json.dump({"edit": out, "thumb": thumb}, open(f"{work}/ep{edl['episode']}.props.json", "w"), ensure_ascii=False)
+
+def credit_lines(tr):
+    """Music and sound credits in the channel's language (tr=text) or the translation language (tr=translation_text)."""
+    songs = f" {tr('and')} ".join(f'"{m}"' for m in style["music"] + ([style["bedTitle"]] if bed and style.get("bedTitle") else []))
+    return "\n".join([tr("music", songs=songs), tr("license"), tr("sfx")])
+
+
+credits = (edl.get("credits") or credit_lines(text)).strip()
 
 
 def description(text, labels, credit):
@@ -296,7 +416,7 @@ def srt_time(t):
 # Subtitles (commentary language) on the edited timeline: every transcript word shown in a clip, grouped into short cues.
 CUE_GAP, CUE_CHARS, CUE_S, LINE = 0.7, 84, 5.0, 42
 shown = sorted((c["from"] / FPS + (w["start"] - OFF - c["src"] / FPS) / c.get("rate", 1), (w["end"] - w["start"]) / c.get("rate", 1), w["word"].strip())
-               for w in words for c in clips if c.get("rate", 1) <= 1 and c["src"] <= (w["start"] - OFF) * FPS and (w["end"] - OFF) * FPS <= c["src"] + span(c))
+               for w in said for c in clips if "file" not in c and c.get("rate", 1) <= 1 and c["src"] <= (w["start"] - OFF) * FPS and (w["end"] - OFF) * FPS <= c["src"] + span(c))
 cues = []
 for t, d, text in shown:
     cur = cues[-1] if cues else None
@@ -321,4 +441,4 @@ with open(f"{OUT}/{edl['output']}.{CFG['language']}.srt", "w") as fh:
 
 print(f"{len(clips)} clips (<2s: {sum(c['dur'] < 120 for c in clips)}), {cursor / FPS / 60:.1f} min total, "
       f"effects={len(effects)} captions={len(captions)} faceZooms={len(face_zooms)} gameZooms={len(game_zooms)} punches={len(out['punches'])} "
-      f"chapters={len(chapters)}")
+      f"chapters={len(chapters)} cards={len(cards)} bed={bed_track or 'off'}" + (f" recap={len(recap)} ranges" if recap else ""))

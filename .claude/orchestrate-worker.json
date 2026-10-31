@@ -10,6 +10,7 @@
       "Bash(.venv/bin/python scripts/lp.py script *)",
       "Bash(.venv/bin/python scripts/lp.py render *)",
       "Bash(.venv/bin/python scripts/lp.py shorts *)",
+      "Bash(.venv/bin/python scripts/lp.py retention *)",
       "Edit(edits/**)",
       "Edit(games/chaosmod/descriptions.*.json)"
     ],

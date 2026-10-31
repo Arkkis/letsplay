@@ -1,5 +1,5 @@
 """Channel settings (config.json, from config.example.json): names, language, on-screen and description text."""
-import json, os
+import json, os, re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _path = os.environ.get("LETSPLAY_CONFIG") or os.path.join(ROOT, "config.json")
@@ -17,6 +17,13 @@ def out_dir(edl):
 def text(key, **kw):
     """On-screen / description text in the channel's language."""
     return CFG["text"][key].format(**kw)
+
+
+def about_partner(line):
+    """True when the streamer addresses the co-op partner (second-person forms from config "partner_words"): talk about
+    the partner's game, which the viewer never sees."""
+    ws = set(CFG.get("partner_words", []))
+    return bool(ws) and any(w in ws for w in re.findall(r"\w+", line.lower()))
 
 
 def translation_text(key, **kw):

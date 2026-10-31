@@ -17,3 +17,6 @@ games/chaosmod/names.json
 node_modules/
 __pycache__/
 *.pyc
+models/
+public/*.mp4.*
+public/*-face-*.png

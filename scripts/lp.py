@@ -17,14 +17,16 @@
   lp.py stats <session-id>                      token use, wall time and tool activity of a Claude Code session
   lp.py publish <edits/x.json> [--at ISO|--now] wait for the user's Studio upload, then apply details, subtitles, playlist;
                                                 schedule/publish only with an explicit --at/--now (the user's go)
+  lp.py retention <edits/x.json>                YouTube audience retention of the published episode mapped onto the script
 """
 import argparse, json, os, re, shutil, subprocess, sys, time, wave
 from difflib import SequenceMatcher
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from trimming import loud_db, merge, trim
+from media import GRADE, video_encoder
+from trimming import MOTION_FPS, loud_db, merge, motion_thr, real_words, trim
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.config import CFG, out_dir, text
+from scripts.config import CFG, about_partner, out_dir, text
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
@@ -56,11 +58,6 @@ def gpu_env():
     return {"LD_LIBRARY_PATH": ":".join(libs + [os.environ.get("LD_LIBRARY_PATH", "")])} if libs else {}
 
 
-def video_encoder():
-    """NVENC when this machine has a working NVIDIA encoder, else x264 at the same quality target."""
-    ok = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1", "-c:v", "h264_nvenc",
-                         "-f", "null", "-"], capture_output=True).returncode == 0
-    return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "17", "-b:v", "0"] if ok else ["-c:v", "libx264", "-preset", "medium", "-crf", "17"]
 TILE_W = 480  # contact-sheet tile width: readable, and small images keep a session's context (and cost) down
 SPLIT_WINDOW, MIN_PAUSE = 6 * 60, 3.0  # a cut lands in the nearest pause of MIN_PAUSE s within the window
 
@@ -123,10 +120,35 @@ def ingest(a):
         np.save(f"{w}/rms100ms.npy", 20 * np.log10(np.sqrt((x ** 2).mean(1)) + 1e-9))
     if not os.path.exists(f"{w}/lang10s.json"):
         run(PY, "scripts/langid.py", f"{w}/audio16k.wav", f"{w}/lang10s.json", env=gpu_env())
+    if not os.path.exists(f"{w}/events.json"):  # laughs, screams, bangs: what the transcript can't show
+        run(PY, "scripts/audio_events.py", f"{w}/audio16k.wav", f"{w}/events.json")
+    if not os.path.exists(f"{w}/motion.npz"):  # visual action in the game and liveliness in the webcam (config "cam")
+        run(PY, "scripts/motion.py", slug, ",".join(map(str, CFG.get("cam") or [])))
     if game == "chaosmod" and not os.path.exists(f"{w}/effects.json"):
         game_lib(slug)  # fails early with instructions if the effect name list hasn't been built yet
         run(PY, "games/chaosmod/ocr_effects.py", vod, 0, dur, f"{w}/effects.json")
     print(f"ingested {slug}: {dur / 60:.0f} min")
+
+
+def events(slug, lo=0, hi=1e9):
+    """Audio events [[start, end, kind, score], ...] in lo–hi from audio_events.py ([] before an ingest made them)."""
+    path = f"work/{slug}/events.json"
+    return [e for e in json.load(open(path)) if lo <= e[0] < hi] if os.path.exists(path) else []
+
+
+def motion(slug):
+    """(game motion, face motion) arrays at MOTION_FPS from motion.py, or (None, None)."""
+    path = f"work/{slug}/motion.npz"
+    if not os.path.exists(path):
+        return None, None
+    m = np.load(path)
+    return m["game"], (m["face"] if len(m["face"]) else None)
+
+
+def game_motion(slug, lo, hi):
+    """trim()'s motion argument for the range: (array, threshold) or None."""
+    g, _ = motion(slug)
+    return (g, motion_thr(g, lo, hi)) if g is not None else None
 
 
 def split(a):
@@ -137,7 +159,7 @@ def split(a):
     words = [x for s in S for x in s["words"]]
     rms = np.load(f"{w}/rms100ms.npy")
     kept = np.zeros(int(dur) + 1)
-    for x, y in trim(words, rms, 0, dur, loud_db(rms, 0, dur)):
+    for x, y in trim(words, rms, 0, dur, loud_db(rms, 0, dur), game_motion(a.slug, 0, dur), events(a.slug)):
         kept[int(x):int(y)] += 1
     cum = np.cumsum(kept)
     n = a.parts or max(1, round(cum[-1] * EDIT_RATIO / (a.target * 60)))
@@ -228,7 +250,7 @@ def context(a):
         else:
             talk.append([x["start"], x["end"], x["text"], who])
     mark = {"host": "", "guest": "[GUEST] ", "?": "[?] "}
-    rows = [(x, f"–{fmt(y)} {mark[who]}{text}") for x, y, text, who in talk]
+    rows = [(x, f"–{fmt(y)} {mark[who]}{'[TO GUEST] ' if spk and who == 'host' and about_partner(text) else ''}{text}") for x, y, text, who in talk]
     lib = game_lib(a.slug)
     rows += [(t, f"[EFFECT] {n} — {lib.desc(n) or '(no description yet)'}") for t, n in effect_events(a.slug, lo, hi)]
     rows += [(x, f"[{lang.upper()} {fmt(x)}–{fmt(y)}] cutscene or mission dialogue; transcript lines here are unreliable")
@@ -239,15 +261,43 @@ def context(a):
     loud = [x for x in loud if x[2] > LOUD_DB]
     for x, y in merge([x[:2] for x in loud], 0.1):  # loud game moments, merged into stretches
         rows.append((x, f"[LOUD {fmt(x)}–{fmt(y)} peak {max(p for a, b, p in loud if x <= a < y):.0f} dB]"))
+    rows += [(x, f"[{kind.upper()} {fmt(x)}–{fmt(y)}]") for x, y, kind, _ in events(a.slug, lo, hi)]
+    rows += [(x, f"[ACTION {fmt(x)}–{fmt(y)}]") for x, y in action_runs(a.slug, lo, hi)]
+    rows += [(x, f"[FACE {fmt(x)}–{fmt(y)}]") for x, y in face_runs(a.slug, lo, hi)]
     out = f"{w}/ep{a.ep}.context.txt"
     with open(out, "w") as fh:
         fh.write(f"# episode {a.ep}: VOD {fmt(lo)}–{fmt(hi)} ({(hi - lo) / 60:.1f} min raw). Times are VOD m:ss; speech lines "
                  "show start –end. [EFFECT] lists what OCR read; effects it missed (flipped/hidden HUD) are still on the vote "
-                 "list in `frames` — look names up in games/chaosmod/names.json."
-                 + (" [GUEST] lines are the co-op partner talking (their gameplay is not in this stream), [?] unclear."
+                 "list in `frames` — look names up in games/chaosmod/names.json. [LAUGH] [SCREAM] [BANG] are heard, not "
+                 "transcribed; [ACTION] is heavy on-screen motion; [FACE] the webcam's liveliest moments (reactions)."
+                 + (" [GUEST] lines are the co-op partner talking (their gameplay is not in this stream), [?] unclear, "
+                    "[TO GUEST] the streamer talking to the partner about the partner's game: nothing of it is on screen."
                     if spk else "") + "\n")
         fh.writelines(f"{fmt(t)} {txt}\n" for t, txt in sorted(rows))
     print(out, len(rows), "lines")
+
+
+def action_runs(slug, lo, hi):
+    """Stretches of heavy game motion (above the range's 95th percentile), ≥ 2 s, merged over 1 s gaps."""
+    g, _ = motion(slug)
+    if g is None:
+        return []
+    thr = motion_thr(g, lo, hi)
+    hits = [i / MOTION_FPS for i in np.nonzero(g[int(lo * MOTION_FPS):int(hi * MOTION_FPS)] > thr)[0]]
+    return [[x, y] for x, y in merge([[lo + t, lo + t + 1 / MOTION_FPS] for t in hits], 1.0) if y - x >= 2]
+
+
+FACE_WINDOWS = 20  # [FACE] lines per episode: the webcam's liveliest 2 s windows
+
+
+def face_runs(slug, lo, hi):
+    _, f = motion(slug)
+    if f is None:
+        return []
+    n = 2 * MOTION_FPS
+    win = [(f[i:i + n].mean(), i / MOTION_FPS) for i in range(int(lo * MOTION_FPS), int(hi * MOTION_FPS) - n, n)]
+    top = sorted(t for _, t in sorted(win, reverse=True)[:FACE_WINDOWS])
+    return merge([[t, t + 2] for t in top], 0.1)
 
 
 def speakers(slug):
@@ -288,17 +338,34 @@ def draft(a):
     words = [x for s in segments for x in s["words"]]
     rms = np.load(f"{w}/rms100ms.npy")
     skip = [r[:2] for r in foreign_runs(a.slug, lo, hi)] + repeat_runs([s for s in segments if lo <= s["start"] < hi])
-    kept = [k for k in trim(words, rms, lo, hi, loud_db(rms, lo, hi)) if not any(x < k[1] and k[0] < y for x, y in skip)]
+    ev = events(a.slug, lo, hi)
+    kept = [k for k in trim(words, rms, lo, hi, loud_db(rms, lo, hi), game_motion(a.slug, lo, hi), ev)
+            if not any(x < k[1] and k[0] < y for x, y in skip)]
     blocks = [b for b in merge(kept, 8.0) if b[1] - b[0] >= 4]
-    # intro: the first ~45 s of talk; cold open: the liveliest 12 s later on (loudness while talking)
+    # intro: the first ~45 s of talk; cold open candidates: the liveliest moments later on (loudness while talking,
+    # laughs and screams heard, action on screen, the webcam moving)
     intro, rest = [], []
     for b in blocks:
         (intro if sum(y - x for x, y in intro) < 40 and b[0] < lo + 120 else rest).append(b)
+    g, f = motion(a.slug)
+    W = 8
     def liveliness(t):
-        talk = any(w["start"] < t + 12 and w["end"] > t for w in words if t - 1 < w["start"] < t + 13)
-        return rms[int(t * 10):int((t + 12) * 10)].mean() + (10 if talk else -50)
-    cands = [t for b in rest if b[0] > lo + 180 for t in np.arange(b[0], b[1] - 12, 2.0)]
-    cold = max(cands, key=liveliness) if cands else rest[0][0]
+        talk = any(w["start"] < t + W and w["end"] > t for w in words if t - 1 < w["start"] < t + W + 1)
+        score = rms[int(t * 10):int((t + W) * 10)].mean() + (10 if talk else -50)
+        score += sum({"laugh": 15, "scream": 10, "bang": 3}[k] * s for x, y, k, s in ev if t <= x < t + W)
+        if g is not None:
+            score += 4 * (g[int(t * MOTION_FPS):int((t + W) * MOTION_FPS)].mean() / (np.median(g[int(lo * MOTION_FPS):int(hi * MOTION_FPS)]) + 1e-6) - 1)
+        if f is not None:
+            score += 3 * (f[int(t * MOTION_FPS):int((t + W) * MOTION_FPS)].mean() / (np.median(f[int(lo * MOTION_FPS):int(hi * MOTION_FPS)]) + 1e-6) - 1)
+        return score
+    cands = sorted((t for b in rest if b[0] > lo + 180 for t in np.arange(b[0], b[1] - W, 2.0)), key=liveliness, reverse=True)
+    picks = []
+    for t in cands:
+        if all(abs(t - u) >= 60 for u in picks):
+            picks.append(float(t))
+        if len(picks) == 8:
+            break
+    cold = sorted(picks[:3]) or [rest[0][0]]
     effects, last_t = [], -99
     for t, name in effect_events(a.slug, lo, hi):
         if t - last_t >= 4 and any(x - 2 <= t < y for x, y in rest):
@@ -313,15 +380,16 @@ def draft(a):
     sib = sibling_edl(a.slug, a.ep) or {}
     copy = lambda k, d: json.loads(json.dumps(sib.get(k, d)))
     title = copy("title", {"kicker": "TODO", "title": "TODO", "tagline": "TODO"})
-    title.update(episode=text("episode", n=a.ep), bg=fmt(cold))
+    title.update(episode=text("episode", n=a.ep), bg=fmt(cold[0]))
     thumb = copy("thumb", {"bgZoom": 1.2, "bgOrigin": "60% 50%", "tag": "TODO"})
-    thumb.update(bg=fmt(cold), face=fmt(cold), tag=re.sub(r"#\d+", f"#{a.ep}", thumb.get("tag", "TODO")), text="TODO")
+    thumb.update(bg=fmt(cold[0]), face=fmt(cold[0]), tag=re.sub(r"#\d+", f"#{a.ep}", thumb.get("tag", "TODO")), text="TODO")
     output = re.sub(r"\d+$", str(a.ep), sib["output"]) if sib.get("output") else text("episode_title", series="TODO", n=a.ep)
     e = {"vod": a.slug, "episode": a.ep, "output": output, "style": sib.get("style", "hype"),
          "playlist": sib.get("playlist", "TODO"), "tags": sib.get("tags", []),
-         "cam": sib.get("cam", [990, 480, 290, 240]), "thumb": thumb, "title": title,
+         "cam": sib.get("cam", CFG.get("cam")), "thumb": thumb, "title": title,
          "lowerThird": {**copy("lowerThird", {"text": CFG["channel"], "sub": "TODO"}), "at": fmt(rest[0][0] + 3)},
-         "coldOpen": [[fmt(cold), fmt(cold + 12), "full"]], "intro": [[fmt(x), fmt(y)] for x, y in intro],
+         **({"recap": "auto"} if a.ep > 1 else {}),
+         "coldOpen": [[fmt(t), fmt(t + 6), "full"] for t in cold], "intro": [[fmt(x), fmt(y)] for x, y in intro],
          "main": [[fmt(x), fmt(y)] for x, y in rest], "effects": effects, "captions": [], "faceZooms": [], "gameZooms": [],
          "chapters": chapters, "endFreeze": {"text": text("to_be_continued") if a.ep < n_parts else text("the_end"), "seconds": 2.5},
          "endScreen": {"seconds": 15, "title": text("coming_next", n=a.ep + 1) if a.ep < n_parts else text("thanks"),
@@ -329,10 +397,14 @@ def draft(a):
          "shorts": [], "description": "TODO", "en": {"title": "TODO", "description": "TODO", "chapters": ["TODO"] * len(chapters)}}
     json.dump(e, open(path, "w"), indent=1, ensure_ascii=False)
     raw = sum(y - x for x, y in kept if x >= rest[0][0]) if rest else 0
+    # contact sheet of the decision points: the liveliest moments (cold open / Shorts candidates) and chapter candidates
+    sheet_file = sheet(a.slug, [fmt(t + 2) for t in picks] + [t for t, _ in chapters[1:11]], f"work/{a.slug}/ep{a.ep}-draft.jpg")
     print(f"{path}: {len(rest)} main ranges (~{raw * EDIT_RATIO / 60:.0f} min after trimming), {len(effects)} effects "
           f"({sum(x[2] == 'TODO' for x in effects)} need a description), {len(chapters)} chapters, "
           f"{len(skip)} English/hallucinated stretches left out. TODO: cut weak ranges, captions, zooms, chapter labels, "
-          "thumbnail, title/description.")
+          "thumbnail, title/description.\n"
+          f"liveliest moments (cold open montage = first 3; Shorts candidates): {', '.join(fmt(t) for t in picks)}\n"
+          f"{sheet_file}: those moments, then the chapter candidates")
 
 
 def script(a):
@@ -344,6 +416,9 @@ def script(a):
     segments, spk = json.load(open(f"{w}/transcript.json"))["segments"], speakers(edl["vod"])
     rows = []
     for c in e["clips"]:
+        if "file" in c:  # recap: cut from another episode's footage
+            rows.append((c["from"], f"~~ whoosh ~~ [recap {c['dur'] / fps:.0f} s from {c['file']}]"))
+            continue
         a0, a1 = c["src"] / fps + off, (c["src"] + c["dur"] * c.get("rate", 1)) / fps + off
         said = " ".join(("[GUEST] " if spk.get(s["start"]) == "guest" else "") + " ".join(x["word"].strip() for x in s["words"] if a0 <= x["start"] < a1)
                         for s in segments if any(a0 <= x["start"] < a1 for x in s["words"]))
@@ -353,8 +428,11 @@ def script(a):
     rows += [(x["at"], f"   BANNER {x['name']} — {x['fi']}") for x in e["effects"]]
     rows += [(z["at"], "   FACE ZOOM") for z in e["faceZooms"]] + [(z["at"], "   GAME ZOOM") for z in e["gameZooms"]]
     rows += [(p["at"], "   PUNCH") for p in e.get("punches", [])]
+    rows += [(c["at"], f"   CHAPTER CARD {c['label']}") for c in e.get("cards", [])]
     rows += [(e["title"]["from"], "== TITLE CARD =="), (e["lowerThird"]["from"], "   LOWER THIRD"),
              (e["freeze"]["from"], f"== FREEZE {e['freeze']['text']} =="), (e["end"]["from"], "== END SCREEN ==")]
+    if e.get("bed"):
+        rows.append((e["introEnd"], f"   MUSIC BED {e['bed']['track']} (ducked under speech) until the freeze"))
     desc = open(f"{out_dir(edl)}/{edl['output']}.description.txt").read()
     rows += [(round(sum(float(v) * 60 ** i for i, v in enumerate(reversed(m[0].split(":")))) * fps), f"## CHAPTER {m[1]}")
              for m in re.findall(r"^(\d+:\d\d) (.+)$", desc, re.M)]
@@ -372,16 +450,21 @@ def faces(a):
     if not sib.get("cam"):
         sys.exit(f"no \"cam\" in {own} or a sibling EDL: set it (webcam rect in VOD pixels) before running faces")
     x, y, cw, ch = sib["cam"]
-    fx, fy, fw, fh = x + cw // 6, y + ch // 12, cw * 2 // 3, ch * 2 // 3  # face region inside the cam
-    proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-ss", str(p["start"]), "-t", str(p["end"] - p["start"]), "-i",
-                             f"footage/{a.slug}.mp4", "-vf", f"fps=4,crop={fw}:{fh}:{fx}:{fy},format=gray", "-f", "rawvideo", "-"],
-                            stdout=subprocess.PIPE)
-    prev, scores, i = None, [], 0
-    while (buf := proc.stdout.read(fw * fh)):
-        cur = np.frombuffer(buf, np.uint8).astype(np.int16)
-        if prev is not None:
-            scores.append((float(np.abs(cur - prev).mean()), p["start"] + i / 4))
-        prev, i = cur, i + 1
+    _, face = motion(a.slug)
+    mz = np.load(f"work/{a.slug}/motion.npz") if face is not None else None
+    if face is not None and list(mz["cam"]) == list(sib["cam"]):  # ingest already measured this webcam
+        scores = [(float(face[i]), i / MOTION_FPS) for i in range(int(p["start"] * MOTION_FPS), min(len(face), int(p["end"] * MOTION_FPS)))]
+    else:
+        fx, fy, fw, fh = x + cw // 6, y + ch // 12, cw * 2 // 3, ch * 2 // 3  # face region inside the cam
+        proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-ss", str(p["start"]), "-t", str(p["end"] - p["start"]), "-i",
+                                 f"footage/{a.slug}.mp4", "-vf", f"fps=4,crop={fw}:{fh}:{fx}:{fy},format=gray", "-f", "rawvideo", "-"],
+                                stdout=subprocess.PIPE)
+        prev, scores, i = None, [], 0
+        while (buf := proc.stdout.read(fw * fh)):
+            cur = np.frombuffer(buf, np.uint8).astype(np.int16)
+            if prev is not None:
+                scores.append((float(np.abs(cur - prev).mean()), p["start"] + i / 4))
+            prev, i = cur, i + 1
     picks = []
     for sc, t in sorted(scores, reverse=True):
         if all(abs(t - u) > 20 for u in picks):
@@ -404,23 +487,26 @@ def faces(a):
     print(sheet, "times:", ", ".join(fmt(t) for t in picks))
 
 
-def frames(a):
-    out = f"work/{a.slug}/frames"
+def sheet(slug, times, out_file):
+    """Contact sheet of VOD frames at the given m:ss times, three per row."""
+    out = f"work/{slug}/frames"
     os.makedirs(out, exist_ok=True)
     tiles = []
-    for t in a.times:
+    for t in times:
         f = f"{out}/{t.replace(':', '_')}.jpg"
-        secs = sum(float(x) * 60 ** i for i, x in enumerate(reversed(t.split(":"))))
-        run("ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", secs, "-i", f"footage/{a.slug}.mp4", "-frames:v", "1",
-            "-vf", f"scale={TILE_W}:-2,drawtext=text='{t.replace(':', '.')}':x=6:y=6:fontsize=22:fontcolor=yellow:box=1:boxcolor=black", f)
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", str(parse_time(t)), "-i", f"footage/{slug}.mp4", "-frames:v", "1",
+                        "-vf", f"scale={TILE_W}:-2,drawtext=text='{t.replace(':', '.')}':x=6:y=6:fontsize=22:fontcolor=yellow:box=1:boxcolor=black", f], check=True)
         tiles.append(f)
     cols = min(3, len(tiles))
-    sheet = f"{out}/sheet-{a.times[0].replace(':', '_')}-{len(tiles)}.jpg"  # one file per request, never overwritten
     inputs = [x for f in tiles for x in ("-i", f)]
     layout = "|".join(f"{i % cols * TILE_W}_{i // cols * TILE_W * 9 // 16}" for i in range(len(tiles)))
-    run("ffmpeg", "-nostdin", "-v", "error", "-y", *inputs, "-filter_complex",
-        f"xstack=inputs={len(tiles)}:layout={layout}:fill=black" if len(tiles) > 1 else "null", sheet)
-    print(sheet)
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *inputs, "-filter_complex",
+                    f"xstack=inputs={len(tiles)}:layout={layout}:fill=black" if len(tiles) > 1 else "null", out_file], check=True)
+    return out_file
+
+
+def frames(a):
+    print(sheet(a.slug, a.times, f"work/{a.slug}/frames/sheet-{a.times[0].replace(':', '_')}-{len(a.times)}.jpg"))  # one file per request
 
 
 def prep(a):
@@ -433,9 +519,7 @@ def prep(a):
     if os.path.exists(out):
         return print(out, "exists")
     off, dur = p["prepStart"], p["prepEnd"] - p["prepStart"]
-    # native resolution, never upscaled: lift shadows, light sharpening
-    run("ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-ss", off, "-t", dur, "-i", f"footage/{a.slug}.mp4",
-        "-vf", "curves=master='0/0 0.12/0.17 0.35/0.42 0.7/0.74 1/1',eq=saturation=1.08,cas=0.3",
+    run("ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-ss", off, "-t", dur, "-i", f"footage/{a.slug}.mp4", "-vf", GRADE,
         "-map", "0:v", "-map", "0:a", *video_encoder(), "-g", 60, "-c:a", "aac", "-b:a", "256k",
         "-movflags", "+faststart", "-f", "mp4", out + ".part.mp4")
     os.rename(out + ".part.mp4", out)
@@ -470,8 +554,9 @@ def check(a):
         sys.exit("\n".join(problems))
     first = lambda xs: xs[0]["at"] + 30 if xs else e["clips"][len(e["clips"]) // 3]["from"]
     stack = next((c["at"] + 30 for c in e["captions"] if c.get("slot")), first(e["captions"]))
-    picks = [e["title"]["from"] + 120, first(e["faceZooms"]), stack, first(e["effects"]) + 10,
-             e["clips"][len(e["clips"]) // 2]["from"] + 10, e["lowerThird"]["from"] + 40, e["freeze"]["from"] + 90, e["end"]["from"] + 200]
+    card = e["cards"][0]["at"] + 40 if e.get("cards") else e["clips"][len(e["clips"]) // 2]["from"] + 10
+    picks = [e["clips"][0]["from"] + 30 if e.get("recap") else e["title"]["from"] + 120, first(e["faceZooms"]), stack, first(e["effects"]) + 10,
+             card, e["lowerThird"]["from"] + 40, e["freeze"]["from"] + 90, e["end"]["from"] + 200]
     d = f"work/{edl['vod']}/check"
     os.makedirs(d, exist_ok=True)
     for f in picks:
@@ -505,8 +590,9 @@ def render(a):
         remotion(edl, "render", "src/index.ts", "LetsPlay", raw, *common, "--crf=17", "--audio-bitrate=320k")
         run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", raw, "-vn", "-c:a", "pcm_s16le", "-ar", SR, state_path(edl, "mix.wav"))
         run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", raw, "-c:v", "copy", "-af", MASTER,
-            "-ar", SR, "-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart", f"{out}.mp4")
+            "-ar", SR, "-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart", f"{out}.new.mp4")
         os.remove(raw)
+        finish(f"{out}.new.mp4", f"{out}.mp4", edl, e)
     json.dump(e, open(state_path(edl, "rendered.json"), "w"))
     remotion(edl, "still", "src/index.ts", "Thumbnail", f"{out}.jpg")
     if not ranges:  # full render: the Shorts too (a patch leaves them alone; `lp.py shorts` re-renders them)
@@ -530,9 +616,11 @@ def item_spans(e):
     """Every timeline element with the output frames it touches (sound effects included), keyed for comparison."""
     spans = []
     for i, c in enumerate(e["clips"]):
-        spans.append((f"clip{i}", c, c["from"] - (20 if c.get("whoosh") else 0), c["from"] + c["dur"]))
-    for k, n in (("effects", 212), ("captions", 132)):
-        spans += [(f"{k}{i}", x, x["at"], x["at"] + x.get("dur", n)) for i, x in enumerate(e[k])]
+        spans.append((f"clip{i}", c, c["from"] - max(20 if c.get("whoosh") else 0, c.get("lead", 0)), c["from"] + c["dur"] + e.get("xfade", 0)))
+    for k, n in (("effects", 212), ("captions", 132), ("cards", 210)):
+        spans += [(f"{k}{i}", x, x["at"], x["at"] + x.get("dur", n)) for i, x in enumerate(e.get(k, []))]
+    if e.get("bed"):  # ducking follows the speech; a change there re-renders that stretch of the bed
+        spans += [(f"talk{i}", t, t[0], t[1]) for i, t in enumerate(e["bed"]["talk"])]
     spans += [(f"punch{i}", p, p["at"] - 2, p["at"] + 20) for i, p in enumerate(e.get("punches", []))]
     for k, pre, post in (("faceZooms", 7, 14), ("gameZooms", 18, 24)):
         spans += [(f"{k}{i}", z, z["at"] - pre, z["end"] + post) for i, z in enumerate(e[k])]
@@ -585,17 +673,50 @@ def patch_ranges(edl, e, spec):
     return merged
 
 
-def keyframes(path, fps):
-    return [round(float(l.split(",")[0]) * fps) for l in subprocess.check_output(
+def video_pts(path):
+    """Presentation times of every video packet (no decode), with the keyframe flag, in file order."""
+    return [(float(l.split(",")[0]), "K" in l.split(",")[1]) for l in subprocess.check_output(
         ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", path],
-        text=True).splitlines() if "K" in l.split(",")[1]]
+        text=True).splitlines()]
+
+
+def keyframes(path, fps):
+    """Keyframe frame index → its exact pts string, for seeking with stream copy."""
+    return {round(t * fps): f"{t:.6f}" for t, k in video_pts(path) if k}
+
+
+def sync_error(path, total, fps):
+    """Why the file's clocks are wrong, or None: the video must have exactly `total` frames at exactly 1/fps each (every
+    presentation time equal to its frame index / fps) and the audio must run as long as the video. Any patch or render
+    whose seams drifted, duplicated or squashed timestamps fails this and is thrown away."""
+    pts = sorted(t for t, _ in video_pts(path))
+    if len(pts) != total:
+        return f"{len(pts)} video frames, expected {total}"
+    off = max(abs(t - i / fps) for i, t in enumerate(pts))
+    if off > 0.5 / fps:
+        return f"video timestamps drift up to {off:.3f} s from their frame index"
+    adur = float(subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=duration",
+                                          "-of", "csv=p=0", path], text=True))
+    if abs(adur - total / fps) > 0.1:
+        return f"audio is {adur:.2f} s, video {total / fps:.2f} s"
+    return None
+
+
+def finish(new, old, edl, e):
+    """Install a rendered episode file only when its video and audio clocks agree; otherwise keep the old file."""
+    err = sync_error(new, e["duration"], e["fps"])
+    if err:
+        os.remove(new)
+        sys.exit(f"render rejected: {err}; {old} left as it was")
+    os.replace(new, old)
 
 
 def render_patch(edl, e, out, common, ranges):
     """Re-render only the given output frame ranges and splice them into the existing episode file.
 
     Video: each range widens to the old file's keyframes (closed GOPs), so the unchanged pieces are stream-copied;
-    pieces are cut by frame count in decode order, never by time (B-frames). Audio: the kept unmastered mix with the
+    pieces are cut by frame count in decode order, never by time (B-frames), and carry no audio (an audio stream's
+    priming offset would shift the concat's timestamps). Audio: the kept unmastered mix with the
     re-rendered ranges' audio spliced in sample-exactly (48000/fps samples per frame), then mastered as a whole so the
     loudness is identical and there is no seam. The result must have exactly the timeline's frame count, else the old
     file is left untouched."""
@@ -606,12 +727,12 @@ def render_patch(edl, e, out, common, ranges):
     segs = []
     for a, b in ranges:  # widen to keyframes: start at one at or before a, end at one at or after b (or the end)
         a = max(k for k in keys if k <= a)
-        b = min((k for k in keys if k >= b), default=total)
+        b = min(min((k for k in keys if k >= b), default=total), total)  # old keyframes may lie past a shorter new end
         if segs and a <= segs[-1][1]:
             segs[-1][1] = max(segs[-1][1], b)
         else:
             segs.append([a, b])
-    print("re-rendering", ", ".join(f"{a / fps / 60:.0f}:{a / fps % 60:04.1f}–{b / fps / 60:.0f}:{b / fps % 60:04.1f}" for a, b in segs),
+    print("re-rendering", ", ".join(f"{fmt(a / fps)}–{fmt(b / fps)}" for a, b in segs),
           f"({sum(b - a for a, b in segs) / total:.0%} of the episode)")
     pieces, audio, cursor, tmp = [], [], 0, []
     for i, (a, b) in enumerate(segs):
@@ -626,32 +747,34 @@ def render_patch(edl, e, out, common, ranges):
         f = f"{work_tmp}/piece{i}.mp4"
         tmp.append(f)
         if kind == "new":
-            remotion(edl, "render", "src/index.ts", "LetsPlay", f, *common, "--crf=17", "--audio-bitrate=320k", f"--frames={a}-{b - 1}")
+            av = f"{work_tmp}/piece{i}.av.mp4"
+            remotion(edl, "render", "src/index.ts", "LetsPlay", av, *common, "--crf=17", "--audio-bitrate=320k", f"--frames={a}-{b - 1}")
             w = f"{work_tmp}/piece{i}.wav"
-            run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", f, "-vn", "-ar", SR, "-af", f"apad=whole_len={(b - a) * spf},atrim=end_sample={(b - a) * spf}",
+            run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", av, "-vn", "-ar", SR, "-af", f"apad=whole_len={(b - a) * spf},atrim=end_sample={(b - a) * spf}",
                 "-c:a", "pcm_s16le", w)
-            tmp.append(w)
+            # video only: the AAC priming of the piece's own audio (2048 samples) would make the concat demuxer shift the whole picture by 43 ms
+            run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", av, "-an", "-c:v", "copy", f)
+            tmp += [av, w]
             audio.append(w)
         else:
-            seek = ["-ss", f"{a / fps:.6f}"] if a else []
+            seek = ["-ss", keys[a]] if a else []  # the keyframe's own pts: a computed time could miss it and copy pre-roll
             run("ffmpeg", "-nostdin", "-v", "error", "-y", *seek, "-i", old, "-map", "0:v", "-c", "copy", "-frames:v", b - a, f)
+            got = video_pts(f)
+            if len(got) != b - a or not got[0][1]:
+                sys.exit(f"piece {a}-{b} of {old} came out as {len(got)} frames{'' if got[0][1] else ' not starting on a keyframe'}; {old} left unchanged")
             w = f"{work_tmp}/piece{i}.wav"
             run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", state_path(edl, "mix.wav"), "-af",
                 f"atrim=start_sample={a * spf}:end_sample={b * spf},asetpts=N/SR/TB", "-c:a", "pcm_s16le", w)
             tmp.append(w)
             audio.append(w)
     lst, mix_new, new = f"{work_tmp}/concat.txt", f"{work_tmp}/mix.wav", f"{out}.new.mp4"
-    with open(lst, "w") as fh:
-        fh.writelines(f"file '{os.path.abspath(f)}'\n" for f in tmp if f.endswith(".mp4"))
+    with open(lst, "w") as fh:  # explicit durations: the next piece starts exactly where this one's frames end, never at a rounded file duration
+        fh.writelines(f"file '{os.path.abspath(f'{work_tmp}/piece{i}.mp4')}'\nduration {(b - a) / fps:.6f}\n" for i, (_, a, b) in enumerate(pieces))
     run("ffmpeg", "-nostdin", "-v", "error", "-y", *[x for w in audio for x in ("-i", w)], "-filter_complex",
         "".join(f"[{i}:a]" for i in range(len(audio))) + f"concat=n={len(audio)}:v=0:a=1", "-c:a", "pcm_s16le", mix_new)
     run("ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "concat", "-safe", 0, "-i", lst, "-i", mix_new, "-map", "0:v", "-map", "1:a",
         "-c:v", "copy", "-af", MASTER, "-ar", SR, "-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart", new)
-    frames = int(subprocess.check_output(["ffprobe", "-v", "error", "-count_packets", "-select_streams", "v", "-show_entries",
-                                          "stream=nb_read_packets", "-of", "csv=p=0", new], text=True))
-    if frames != total:
-        sys.exit(f"patch produced {frames} frames, expected {total}; {old} left unchanged")
-    os.replace(new, old)
+    finish(new, old, edl, e)
     os.replace(mix_new, state_path(edl, "mix.wav"))
     for f in tmp + [lst]:
         os.remove(f)
@@ -675,36 +798,77 @@ def short_name(edl, k):
     return f"{out_dir(edl)}/shorts/{edl['output']} - Short {k}"
 
 
+CUE_WORDS, CUE_SPAN = 4, 1.6  # Shorts are watched muted: every line is captioned, a few words at a time
+
+
+def short_cues(words, clips, fps, off):
+    """Word-by-word captions for every spoken word inside a Short's clips: {at, text, words, dur} in Short frames."""
+    shown = [(c["from"] + round((w["start"] - off) * fps) - c["src"], max(1, round((w["end"] - w["start"]) * fps)), w["word"].strip())
+             for c in clips for w in words if c["src"] <= (w["start"] - off) * fps < c["src"] + c["dur"]]
+    cues = []
+    for at, d, word in shown:
+        cur = cues[-1] if cues else None
+        if cur and len(cur["words"]) < CUE_WORDS and at - cur["at"] <= CUE_SPAN * fps and at - cur["end"] < 0.5 * fps and cur["text"][-1:] not in ".?!":
+            cur["words"].append(at - cur["at"])
+            cur["text"] += " " + word
+            cur["end"] = at + d
+        else:
+            cues.append({"at": at, "end": at + d, "text": word, "words": [0]})
+    for cue, nxt in zip(cues, cues[1:] + [None]):
+        cue["text"] = cue["text"].upper()
+        cue["dur"] = min(cue.pop("end") - cue["at"] + 45, nxt["at"] - cue["at"] if nxt else 10 ** 6)
+    return cues
+
+
 def build_shorts(edl, e):
-    """Props for each Short in the EDL: a continuous VOD stretch, with the episode's captions and banners that fall in it."""
-    fps, off = e["fps"], part(edl["vod"], edl["episode"])["prepStart"]
-    vod_time = lambda f: next(((c["src"] + (f - c["from"]) * c.get("rate", 1)) / fps + off for c in e["clips"] if c["from"] <= f < c["from"] + c["dur"]), None)
+    """Props for each Short in the EDL: one VOD stretch (from–to) or two ("ranges", one internal cut), every spoken word
+    captioned, with the episode's own captions (shown big) and banners that fall in it."""
+    fps, p = e["fps"], part(edl["vod"], edl["episode"])
+    off = p["prepStart"]
+    vod_time = lambda f: next(((c["src"] + (f - c["from"]) * c.get("rate", 1)) / fps + off for c in e["clips"]
+                               if "file" not in c and c["from"] <= f < c["from"] + c["dur"]), None)
     tag = re.sub(r"\s*#\d+$", "", edl["thumb"].get("tag", ""))
+    words = real_words([w for s in json.load(open(f"work/{edl['vod']}/transcript.json"))["segments"] for w in s["words"]],
+                       np.load(f"work/{edl['vod']}/rms100ms.npy"))
     out, problems = [], []
     for k, sh in enumerate(edl.get("shorts", []), 1):
-        a, b = parse_time(sh["from"]), parse_time(sh["to"])
-        p = part(edl["vod"], edl["episode"])
-        if not SHORT_MIN <= b - a <= SHORT_MAX or a < p["prepStart"] or b > p["prepEnd"]:
-            problems.append(f"short {k} ({sh['from']}–{sh['to']}): must be {SHORT_MIN}–{SHORT_MAX} s inside this episode's footage")
+        ranges = [[parse_time(x), parse_time(y)] for x, y in sh.get("ranges") or [[sh["from"], sh["to"]]]]
+        label = ", ".join(f"{fmt(x)}–{fmt(y)}" for x, y in ranges)
+        total = sum(y - x for x, y in ranges)
+        if not SHORT_MIN <= total <= SHORT_MAX or any(x < p["prepStart"] or y > p["prepEnd"] or y <= x for x, y in ranges):
+            problems.append(f"short {k} ({label}): must total {SHORT_MIN}–{SHORT_MAX} s inside this episode's footage")
             continue
-        if (g := guest_share(edl["vod"], a, b)) > 0.35:
-            problems.append(f"short {k} ({sh['from']}–{sh['to']}): {g:.0%} of the talking is the co-op guest, whose gameplay "
-                            "isn't in this stream; pick a moment of the streamer's own")
-            continue
+        if (g := max(guest_share(edl["vod"], x, y) for x, y in ranges)) > 0.35:
+            msg = f"short {k} ({label}): {g:.0%} of the talking is the co-op guest, whose gameplay isn't in this stream"
+            if not sh.get("onScreen"):  # the labels are mouth-motion guesses: an "onScreen" note says the frames were checked
+                problems.append(msg + "; pick a moment of the streamer's own, or say what the streamer's screen shows in \"onScreen\"")
+                continue
+            print(f"warning: {msg}; kept because onScreen = {sh['onScreen']!r}")
+        clips, cur = [], 0
+        for x, y in ranges:
+            d = round((y - x) * fps)
+            clips.append({"src": round((x - off) * fps), "dur": d, "from": cur})
+            cur += d
+        def short_frame(t):
+            return next((c["from"] + round((t - off) * fps) - c["src"] for c in clips if c["src"] <= (t - off) * fps < c["src"] + c["dur"] - fps), None)
         def inside(items, key):
             seen, res = set(), []
             for x in items:
                 t = vod_time(x["at"])
-                if t is not None and a <= t < b - 1 and x[key] not in seen:  # cold-open repeats map to the same moment
+                f = short_frame(t) if t is not None else None
+                if f is not None and x[key] not in seen:  # cold-open repeats map to the same moment
                     seen.add(x[key])
-                    res.append({**x, "at": round((t - a) * fps)})
+                    res.append({**x, "at": f})
             return res
-        out.append({"short": {"source": e["source"], "fps": fps, "style": e["style"], "src": round((a - off) * fps),
-                              "dur": round((b - a) * fps), "cropX": sh.get("cropX", 420), "cam": e["cam"], "title": sh["title"],
+        big = inside(e["captions"], "text")
+        cues = [c for c in short_cues(words, clips, fps, off) if not any(b["at"] - 10 <= c["at"] < b["at"] + b["dur"] for b in big)]
+        captions = sorted(cues + [{**b, "big": True} for b in big], key=lambda c: c["at"])
+        out.append({"short": {"source": e["source"], "fps": fps, "style": e["style"], "clips": clips, "dur": cur,
+                              "cropX": sh.get("cropX", 420), "cam": e["cam"], "title": sh["title"],
                               "tag": tag, "cta": text("full_episode", episode=edl["title"].get("episode", "")).strip(),
                               "text": {"channel": CFG["channel"], "from_stream": text("from_stream"),
                                        "effect_label": effect_label(edl)},
-                              "captions": inside(e["captions"], "text"), "effects": inside(e["effects"], "name")}})
+                              "captions": captions, "effects": inside(e["effects"], "name")}})
     return out, problems
 
 
@@ -780,6 +944,8 @@ def publish_shorts(edl, episode_id, taken, iso):
                 continue
             length = probe_duration(f"{n}.mp4")
             m = [v for v in vids if abs(iso(v["duration"]) - length) <= 1]
+            key = re.sub(r"\W+", " ", os.path.basename(n)).strip().lower()  # Studio titles the upload after the file: same-length Shorts don't swap
+            m.sort(key=lambda v: re.sub(r"\W+", " ", v["title"]).strip().lower() != key)
             if m:
                 ids[n] = m[0]["id"]
                 vids.remove(m[0])
@@ -794,6 +960,41 @@ def publish_shorts(edl, episode_id, taken, iso):
         if len(ids) < len(names):
             print(f"waiting for {len(names) - len(ids)} Short upload(s)…", flush=True)
             time.sleep(30)
+
+
+def retention(a):
+    """Audience retention of the published episode (YouTube Analytics) on the edit's own timeline: the curve in 10 %
+    steps and the sharpest drops with the script lines playing there. Written to work/<vod>/epN.retention.txt."""
+    import youtube_mcp as yt
+    edl = json.load(open(a.edl))
+    state = state_path(edl, "youtube.json")
+    if not os.path.exists(state):
+        sys.exit("episode not published yet (no work/<vod>/epN.youtube.json)")
+    vid = json.load(open(state))["id"]
+    rows = yt.retention(vid)
+    if not rows:
+        sys.exit("no retention data yet: YouTube needs a public video and a few days of views")
+    length = probe_duration(f"{out_dir(edl)}/{edl['output']}.mp4")
+    script_rows = []
+    if os.path.exists(state_path(edl, "script.txt")):
+        for line in open(state_path(edl, "script.txt")):
+            m = re.match(r"(\d+:\d+\.\d) (.*)", line)
+            if m:
+                script_rows.append((parse_time(m[1]), m[2]))
+    lines = [f"# {edl['output']} ({vid}): audience retention, {len(rows)} points over {length / 60:.1f} min",
+             "position  watched  vs similar videos"]
+    for ratio, watched, rel in rows:
+        if round(ratio * 100) % 10 == 0:
+            lines.append(f"{fmt(ratio * length):>8}  {watched:6.0%}  {rel}")
+    drops = sorted(((rows[i][1] - rows[i + 1][1], rows[i][0] * length) for i in range(len(rows) - 1)), reverse=True)[:8]
+    lines.append("\nsharpest drops (lost share of viewers per step, output time, what plays there):")
+    for d, t in sorted(drops, key=lambda x: x[1]):
+        near = [f"      {fmt(s)} {txt}" for s, txt in script_rows if t - 8 <= s < t + 8][:4]
+        lines += [f"  -{d:.1%} at {fmt(t)}"] + near
+    out = state_path(edl, "retention.txt")
+    open(out, "w").write("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    print(out)
 
 
 ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -812,11 +1013,11 @@ g = s.add_mutually_exclusive_group(); g.add_argument("--at", help="schedule: ISO
 g.add_argument("--now", action="store_true", help="make public immediately")
 s = sub.add_parser("frames"); s.add_argument("slug"); s.add_argument("times", nargs="+")
 s = sub.add_parser("speakers"); s.add_argument("slug"); s.add_argument("--host", required=True); s.add_argument("--guest", required=True)
-for c in ("check", "script", "shorts", "render"):
+for c in ("check", "script", "shorts", "retention", "render"):
     s = sub.add_parser(c); s.add_argument("edl")
 s.add_argument("--patch", nargs="?", const="auto", metavar="RANGES",
                help="re-render only what changed and splice it in: auto (default; diff against the last render), end, "
                     "m:ss-m:ss output-time ranges, comma-separated (e.g. auto,end or 12:30-13:10)")
 a = ap.parse_args()
 {"stats": lambda a: run(PY, "scripts/session_stats.py", a.session), "ingest": ingest, "split": split, "context": context, "draft": draft, "faces": faces, "frames": frames, "prep": prep, "speakers": speakers_cmd,
- "check": check, "render": render, "script": script, "shorts": shorts, "publish": publish}[a.cmd](a)
+ "check": check, "render": render, "script": script, "shorts": shorts, "publish": publish, "retention": retention}[a.cmd](a)

@@ -2,6 +2,7 @@ faster-whisper>=1.1
 av<16
 numpy
 rapidocr-onnxruntime
+onnxruntime
 mcp>=2
 google-api-python-client
 google-auth-oauthlib

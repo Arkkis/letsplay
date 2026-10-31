@@ -1,8 +1,10 @@
 {
  "hype": {"headline": "#F8D028", "glitch": true,
-  "intro": "funk", "outro": "elevator", "introVolume": 0.5, "music": ["Funk Game Loop", "Local Forecast - Elevator"]},
+  "intro": "funk", "outro": "elevator", "introVolume": 0.5, "music": ["Funk Game Loop", "Local Forecast - Elevator"],
+  "bed": "monkeys", "bedTitle": "Monkeys Spinning Monkeys", "bedVolume": 0.12},
  "horror": {"headline": "#F2E8D5", "glitch": true,
   "intro": "darkest-child", "outro": "ossuary", "introVolume": 0.6, "music": ["Darkest Child", "Ossuary 6 - Air"]},
  "chill": {"headline": "#FFD166", "glitch": false,
-  "intro": "carefree", "outro": "lobby-time", "introVolume": 0.45, "music": ["Carefree", "Lobby Time"]}
+  "intro": "carefree", "outro": "lobby-time", "introVolume": 0.45, "music": ["Carefree", "Lobby Time"],
+  "bed": "wallpaper", "bedTitle": "Wallpaper", "bedVolume": 0.12}
 }

@@ -5,6 +5,9 @@
  "language": "en",
  "translation": null,
  "edit_ratio": 0.87,
+ "cam": [990, 480, 290, 240],
+ "transcript_prompt": "Okay, so, yeah, what the fuck, oh no, hah hah, let's go.",
+ "partner_words": ["you", "your", "yours", "you're", "you've", "you'll", "yourself"],
  "text": {
   "next_episode": "NEXT EPISODE",
   "watch_next": "WATCH NEXT",
@@ -15,6 +18,8 @@
   "coming_next": "PART {n} COMING",
   "thanks": "THANKS FOR WATCHING",
   "episode": "PART {n}",
+  "previously": "PREVIOUSLY",
+  "chapter": "CHAPTER {n}",
   "episode_title": "{series} - Part {n}",
   "full_episode": "FULL EPISODE: {episode}",
   "from_stream": "from a Twitch stream",

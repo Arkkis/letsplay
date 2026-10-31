@@ -5,18 +5,20 @@ Uploading stays manual: API uploads from an unaudited Google Cloud project are l
   youtube_mcp.py        run the MCP server over stdio
 Credentials live in ~/.config/letsplay-youtube/: client_secret.json (Desktop-app OAuth client) and token.json.
 """
-import glob, json, os, re, sys
+import glob, json, os, re, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import CFG, out_dir
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONF = os.path.expanduser("~/.config/letsplay-youtube")
 SECRET, TOKEN = f"{CONF}/client_secret.json", f"{CONF}/token.json"
-SCOPES = ["https://www.googleapis.com/auth/youtube", "https://www.googleapis.com/auth/youtube.force-ssl"]  # force-ssl: captions
+SCOPES = ["https://www.googleapis.com/auth/youtube", "https://www.googleapis.com/auth/youtube.force-ssl",  # force-ssl: captions
+          "https://www.googleapis.com/auth/yt-analytics.readonly"]  # audience retention
 GAMING = "20"
 
 
@@ -29,7 +31,7 @@ def auth():
     print("signed in; token saved to", TOKEN)
 
 
-def yt():
+def credentials():
     if not os.path.exists(TOKEN):
         raise RuntimeError(f"not signed in: run `{sys.executable} {__file__} auth`")
     creds = Credentials.from_authorized_user_file(TOKEN, SCOPES)
@@ -37,7 +39,26 @@ def yt():
         creds.refresh(Request())
         with open(TOKEN, "w") as fh:
             fh.write(creds.to_json())
-    return build("youtube", "v3", credentials=creds, cache_discovery=False)
+    return creds
+
+
+def yt():
+    return build("youtube", "v3", credentials=credentials(), cache_discovery=False)
+
+
+def retention(video_id):
+    """Audience retention curve: [(position 0–1, share still watching, relative performance), ...] (100 points);
+    [] when YouTube has no data yet. Needs the analytics scope: a token from before it exists must be renewed with `auth`."""
+    from googleapiclient.errors import HttpError
+    an = build("youtubeAnalytics", "v2", credentials=credentials(), cache_discovery=False)
+    try:
+        r = an.reports().query(ids="channel==MINE", startDate="2000-01-01", endDate="2100-01-01", dimensions="elapsedVideoTimeRatio",
+                               metrics="audienceWatchRatio,relativeRetentionPerformance", filters=f"video=={video_id}").execute()
+    except HttpError as e:
+        if e.resp.status == 403:
+            raise RuntimeError(f"analytics not allowed by the saved sign-in: run `{sys.executable} {__file__} auth` again") from e
+        raise
+    return [(row[0], row[1], row[2]) for row in r.get("rows", [])]
 
 
 def out_file(output, ext):
@@ -184,8 +205,14 @@ def add_to_playlist(video_id: str, playlist: str) -> str:
                                                                 "status": {"privacyStatus": "public"}}).execute()["id"]
     if any(i["contentDetails"]["videoId"] == video_id for i in items):
         return f"already in '{playlist}'"
-    y.playlistItems().insert(part="snippet", body={"snippet": {"playlistId": pl, "resourceId": {"kind": "youtube#video", "videoId": video_id}}}).execute()
-    return f"added to '{playlist}' ({pl})"
+    for attempt in range(5):  # a just-created playlist answers 409 SERVICE_UNAVAILABLE for a while
+        try:
+            y.playlistItems().insert(part="snippet", body={"snippet": {"playlistId": pl, "resourceId": {"kind": "youtube#video", "videoId": video_id}}}).execute()
+            return f"added to '{playlist}' ({pl})"
+        except HttpError as e:
+            if e.resp.status != 409 or attempt == 4:
+                raise
+            time.sleep(15 * (attempt + 1))
 
 
 @server.tool()
@@ -196,6 +223,13 @@ def set_visibility(video_id: str, privacy: str, publish_at: str | None = None) -
         raise ValueError("privacy must be private, unlisted or public")
     status = update_status(yt(), video_id, **({"privacyStatus": "private", "publishAt": publish_at} if publish_at else {"privacyStatus": privacy}))
     return {"id": video_id, **status}
+
+
+@server.tool()
+def video_retention(video_id: str) -> list[dict]:
+    """Audience retention of a published video in 5 % steps: position (0–1), share of viewers still watching, performance
+    relative to similar videos. Empty until YouTube has a few days of views. `lp.py retention <edl>` maps it onto the script."""
+    return [{"position": p, "watching": w, "relative": r} for p, w, r in retention(video_id) if round(p * 100) % 5 == 0]
 
 
 if __name__ == "__main__":
