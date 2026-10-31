@@ -85,3 +85,27 @@ into `RULEBOOK.md` as a numbered rule and delete it here. Keep this file under ~
 - 2026-10-31 Vice City ep1 remake: 13.6 min from 3.5 h VOD, −14.3 LUFS, 56 clips (1 under 2 s), 11 captions, 9
   chapters, 3 Shorts of 19–21 s after the frame check (it removed 2 chapters, 7 captions, both cold-open hits and 3
   Shorts of the talk-based cut). The new trim keeps ~18 % more than the old one at the same ranges.
+
+- 2026-10-31 Vice City ep2 remake: the frame sweep (every 30 s, 3 sheets) before reading captions settled the episode in
+  one pass: the old talk-based cut's "Tehtävä läpi" was the partner's pass, "Lentokone sairaalalla" had no plane in any frame
+  69:31–69:52, the Red Dead line and "Kuka ampui?" sat over a calm drive. Rule: sweep the whole part at 30 s first, then
+  close frames (2–3 s apart) only around the candidates; ~6 sheets for a 36 min part.
+- 2026-10-31 Chapter cards wait for a caption that starts at the same time (card 2.5–3 s later), so a chapter placed on a
+  captioned line lands on the next clip. Put the chapter on the reveal and drop the caption there, or place the chapter 3 s earlier.
+- 2026-10-31 A main range ending at Whisper's word boundary where the next word starts at the same instant
+  ("pamppuja"[…33.54] "Mun"[33.54…]) snaps to include the next word; end such ranges 0.2 s inside the last wanted word.
+- 2026-10-31 A `[?]`/`[GUEST]` line about a thing on the streamer's screen (the rooftop rocket pickup, the 130 shells) is a
+  mislabel; the frame decides, but it still can't be captioned (check refuses GUEST), so the Short carries it in `onScreen`.
+- 2026-10-31 Thumbnail: a subject in the frame's centre (the burning character at x 51 %) ends up behind the face cut-out with
+  the default origin, and `bgOrigin` "100% 100%" moves it left but keeps the stream webcam. Zoom 1.5 with origin "100% 16%"
+  put it bottom-left under the hook text and pushed the webcam off the bottom (webcam top 72 % → 0.16 + 0.56 × 1.5 = 1.0).
+  Look at the rendered jpg every time: the hook must show the thing it names (7.1).
+- 2026-10-31 User: chapter ("Luku") titles described only the frame at the chapter time ("Paloauto", "Sairaalan pickup"),
+  not the chapter. A label covers the whole span to the next chapter, in visible things ("Paloauto ja yöajelu",
+  "Pickup-kierros"); write it after reading the script's lines between the two chapters. Rule 11.2 updated; ep2 relabelled and patched.
+- 2026-10-31 User: too many chapters (13 in 9.9 min, two inside a minute). A chapter is a 2–3 min story beat; ep2 cut to 6.
+  `check` now warns when chapters are under 90 s apart; rule 11.1 rewritten.
+- 2026-10-31 User asked for caption proof-reading before rendering: `lp.py proof` (second Whisper decode per caption line and
+  per Short, flags unheard words) and `"wordFixes"` in the EDL for the Short cues and subtitles. Skill step 3.7, rule 8.6.
+- 2026-10-31 User: the recap and the cold open mixed up. The recap now has its own look (saturate 0.45, letterbox 90 px) and exits
+  through 18 frames of fade and 30 frames of black (build_edit RECAP_FADE_F/RECAP_GAP_F, LetsPlay.tsx `fade`). Rule 5.3b.

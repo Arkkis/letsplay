@@ -1,6 +1,7 @@
 """Silence trimming shared by the edit build and the episode splitter: keep speech, loud game moments, visual action and
 audio events (laughs, screams, bangs); jump-cut the rest. A pause after a punchline, a question or a laugh is kept as
 comedic timing, and shots are at least MIN_CLIP long."""
+import re
 import numpy as np
 
 MERGE_GAP = 1.5       # silences shorter than this stay in
@@ -19,6 +20,20 @@ def real_words(words, rms):
     level = float(np.median([peak(w["start"], w["end"]) for w in words])) if words else 0
     return [w for w in words if w["end"] - w["start"] >= 0.05
             and not (w["end"] - w["start"] > GHOST_LONG and peak((w["start"] + w["end"]) / 2, w["end"]) < level - GHOST_DB)]
+
+
+def fix_words(words, fixes):
+    """Transcript words with the EDL's "wordFixes" applied ({"heard": "said"}, matched on the bare lower-case word, trailing
+    punctuation kept): proof-read spellings for the Short cues and the subtitle file without editing the transcript."""
+    if not fixes:
+        return words
+    table = {k.lower(): v for k, v in fixes.items()}
+    out = []
+    for w in words:
+        m = re.match(r"^(\s*)(.*?)([.,!?…]*)$", w["word"])
+        fixed = table.get(m.group(2).lower())
+        out.append({**w, "word": f"{m.group(1)}{fixed}{m.group(3)}"} if fixed else w)
+    return out
 
 
 def loud_db(rms, a, b):

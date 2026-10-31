@@ -66,21 +66,26 @@ by you and every edit is reviewed by you before it renders. Never ship a draft a
    3. Curate the draft like a professional editor (`RULEBOOK.md`): drop weak or repetitive ranges, tighten boundaries to
       sentence ends, pick the real cold open and intro, write verbatim captions, place face/game zooms, write one-line descriptions
       for effects without one (they're saved to `games/chaosmod/descriptions.<language>.json` for later episodes), chapter labels, title,
-      description and the translation.
+      description and the translation. A chapter label sums up the whole span from its time to the next chapter (what the
+      viewer sees across it: places, vehicles, retries, results), never just the frame at the chapter time (`RULEBOOK.md` 11.2).
+      One chapter per story beat of 2–3 min (4–6 in a 10 min episode), never two inside a minute (11.1).
    4. Shorts: pick 2–4 of the episode's best self-contained moments for `"shorts"` (see Shorts below).
    5. **Frame check (co-op: mandatory, otherwise whenever a label names a thing).** `lp.py frames <slug> <m:ss> ...`
       at the time of every chapter, caption, cold-open hit and Short (a few frames across each range) and look at the
       sheet: the named thing (plane, fire, bank, sniper, motorbike…) must be in the game frame. If it isn't, the line
-      was about the partner's game or about nothing: drop it and name the chapter after what the frame shows (the
-      mission screen, the vehicle, the place, the on-screen text). Talk alone never names anything.
+      was about the partner's game or about nothing: drop it and name the chapter after what the frames across its whole
+      span show (the mission screen, the vehicle, the place, the on-screen text). Talk alone never names anything.
    6. Thumbnail: `lp.py faces <slug> N` (liveliest webcam moments) and `lp.py frames <slug> <m:ss> ...` (game frames)
       → pick `thumb.face`, `thumb.bg` and 2–4 words of text.
-   7. `lp.py check edits/<slug>-epN.json` → fix everything it reports (all problems are listed at once), then read the
-      grid `work/<slug>/epN-check.jpg`.
+   7. **Proof-read** `lp.py proof edits/<slug>-epN.json` → read `work/<slug>/epN.proof.txt`: every caption's line and every
+      Short decoded a second time beside the transcript and the caption text. Fix every `!!` (caption words heard in
+      neither decode: rewrite the caption to what is said) and every `??` (transcript words the second pass doesn't hear:
+      they become the Short's cues and the subtitles, so map them in `"wordFixes"`). Then `lp.py check edits/<slug>-epN.json`
+      → fix everything it reports (all problems are listed at once), then read the grid `work/<slug>/epN-check.jpg`.
    8. **Review** `lp.py script edits/<slug>-epN.json` → read `work/<slug>/epN.script.txt` top to bottom as the viewer
       will meet it: does every cut land on a finished sentence, does each joke get its setup, are there thank-yous or chat
-      admin left, do captions/banners/zooms land on the right beat, does each `CHAPTER CARD` sit where its beat starts,
-      is anything repeated or confusing? Fix and re-run until it reads like a finished episode.
+      admin left, do captions/banners/zooms land on the right beat, does each `CHAPTER CARD` sit where its beat starts
+      and does its label cover everything up to the next card, is anything repeated or confusing? Fix and re-run until it reads like a finished episode.
    9. `lp.py render edits/<slug>-epN.json` → `out/<playlist>/<output>.mp4` (≈ 17–27 min), `<output>.jpg` (thumbnail),
       `<output>.description.txt`, `.<language>.srt`, `.<translation>.json`, and the Shorts in `out/<playlist>/shorts/` (~25 s each to render). Check the printed loudness is about −14 LUFS and look at
       the thumbnail. Later fixes: `--patch` (see below), never a full re-render.
@@ -191,6 +196,7 @@ All times are VOD times as `m:ss[.s]` (minutes may exceed 59, e.g. `62:18`). See
  "effects":  [["4:29", "Heavy Recoil", "Guns kick like a mule"]],   // rough time, mod effect name (as in context), one-line description ("" = from the library)
  "effectLabel": "ARVONTA",             // optional: hand-placed banners without a game module; times are exact, description required
  "captions": [["5:34", "minimap", "I CAN'T SEE MY MINIMAP AT ALL"]], // rough time, a word in the transcript segment, verbatim caps text
+ "wordFixes": {"Taviraalassa": "Sairaalassa"},   // optional, from `proof`: transcript spellings corrected in Short cues and subtitles (bare word, case-insensitive)
  "faceZooms": ["7:28"], "gameZooms": ["17:15"],
  "chapters": [["0:00", "Intro"], ["3:40", "The chaos begins"]],
  "shorts": [{"from": "47:30.0", "to": "47:52.0", "title": "WHO'S IN THE BACK SEAT?", "cropX": 420},  // VOD times; cropX optional

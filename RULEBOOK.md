@@ -59,6 +59,9 @@ The episode runs: cold open → title card → intro → (recap) → main → fr
 - 5.2 Intro: the streamer explaining what is going on (the mod, the goal, the partner).
 - 5.3 Recap (episode 2+): `"recap": "auto"` replays the previous cold open under a "previously" tag; pick other ranges
   when the story needs a different reminder; drop it when the episodes don't connect.
+- 5.3b The recap is set apart from the episode: graded flat (desaturated, darker) under letterbox bars with the
+  "previously" tag, and it exits on a 0.3 s fade to black plus 0.5 s of black and silence before the cold open's whoosh.
+  User: without that the two blurred together (Vice City ep2).
 - 5.4 The same location or moment never appears in both cold open/intro/recap and main: remove it from `main`.
 - 5.5 Main stays chronological and never goes back inside the intro's span (no `main` range between the first intro
   range's start and the last one's end; `check` refuses them). An intro pulled forward from later in the VOD is fine
@@ -107,6 +110,10 @@ The episode runs: cold open → title card → intro → (recap) → main → fr
 - 8.2 Only the best lines, about 2 per minute at most. Overlapping captions stack automatically.
 - 8.3 Not on `[GUEST]` or `[TO GUEST]` lines (7.4, 7.5).
 - 8.4 A caption may sit in the cold open; the same line then shows there and in main.
+- 8.6 Proof-read before `check`: `lp.py proof` decodes every caption's line and every Short a second time and flags
+  caption words heard in neither decode and Short words the second pass doesn't hear. Whisper garbles colloquial words
+  ("Taviraalassa", "päsäpallomaailma"); the caption text is corrected by hand and the Short cues and subtitles through
+  `"wordFixes"` in the EDL. Nothing renders with an unread proof file.
 - 8.5 Whisper's ghost words (0 s long, or stretched over silence at a quiet segment end) are never captioned: the
   build drops them from Short cues and subtitles. A caption nobody can hear on the Short is wrong even if the transcript
   has it; when one slips through, check the voice-band loudness at its time.
@@ -127,9 +134,11 @@ The episode runs: cold open → title card → intro → (recap) → main → fr
 
 ## 11. Chapters
 
-- 11.1 First at 0:00, at least 10 s apart, one per real story beat.
-- 11.2 A label is what the viewer sees at that time: the mission text, the vehicle, the place, the retry, the result.
-  Never the topic of the talk (7.1, 7.2).
+- 11.1 First at 0:00, one per real story beat of about 2–3 minutes: a 10 min episode has 4–6 chapters, a 25 min one
+  8–12. Two cards inside a minute is too many; `check` warns under 90 s (the YouTube minimum of 10 s is not the measure).
+- 11.2 A label sums up the whole chapter, from its time to the next chapter's, in things the viewer sees across it:
+  the places, vehicles, retries and results of that span ("Rautakauppa ja skootteri", "Kojusta pihalle"), never only
+  the frame at the chapter time ("Paloauto" for a span that is mostly a night drive) and never the topic of the talk (7.1, 7.2).
 - 11.3 Put the chapter where its beat starts in the edit, on the reveal itself or on the place, never before the
   payoff: "Lentokone keskellä tietä" 10 s before the plane and "Kaikki tulessa" 20 s before the fire spoil the gag.
 - 11.4 Labels are read on screen as cards: 2–4 words, no spoilers of the beat ("Kissat kyydissä", not "Kissat kuolee").
@@ -172,7 +181,7 @@ The episode runs: cold open → title card → intro → (recap) → main → fr
 
 ## 16. Review and verification
 
-- 16.1 `check` must pass; fix everything it reports, then read the check grid.
+- 16.1 `proof` read and its flags resolved, then `check` must pass; fix everything it reports, then read the check grid.
 - 16.2 Read the script top to bottom as the viewer meets it: every cut on a finished sentence, every joke with its
   setup, no thank-yous or chat admin left, captions/banners/zooms on the right beat, each chapter card where its beat
   starts, nothing repeated or confusing.

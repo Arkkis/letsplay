@@ -4,7 +4,7 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENV = {**os.environ, "LETSPLAY_CONFIG": os.path.join(ROOT, "config.example.json")}
-COMMANDS = "ingest split context draft faces frames prep check script shorts render publish stats retention".split()
+COMMANDS = "ingest split context draft faces frames prep check script shorts render publish stats retention proof".split()
 
 
 class Smoke(unittest.TestCase):
@@ -48,3 +48,14 @@ class Smoke(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WordFixes(unittest.TestCase):
+    def test_fix_words_keeps_spacing_and_punctuation(self):
+        sys.path.insert(0, os.path.join(ROOT, "scripts"))
+        from trimming import fix_words
+        words = [{"start": 0, "end": 1, "word": " Taviraalassa"}, {"start": 1, "end": 2, "word": " päsäpallomaailma,"}, {"start": 2, "end": 3, "word": " kymppi."}]
+        out = fix_words(words, {"taviraalassa": "Sairaalassa", "Päsäpallomaailma": "pesäpallomaila"})
+        self.assertEqual([w["word"] for w in out], [" Sairaalassa", " pesäpallomaila,", " kymppi."])
+        self.assertEqual(fix_words(words, None), words)
+

@@ -12,7 +12,7 @@ import hashlib, json, os, re, subprocess, sys
 from difflib import SequenceMatcher
 import numpy as np
 from media import GRADE, video_encoder
-from trimming import loud_db, merge, motion_thr, real_words, trim
+from trimming import fix_words, loud_db, merge, motion_thr, real_words, trim
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import CFG, about_partner, out_dir, text, translation_text
 
@@ -23,6 +23,7 @@ CAPTION_F, ZOOM_HOLD_F, ZOOM_SPACING_F, EFFECT_SEARCH_S = 132, 110, 240, 30
 WORD_F = 7  # caption word cadence when a word can't be matched to speech
 PUNCH_SPACING_F, PUNCH_RISE_DB = 15 * FPS, 10  # audio-reactive punch-ins: at most one per 15 s, on a sharp loudness rise
 XFADE_F, LEAD_F = 5, 9  # audio crossfade over every cut; J-cut lead when the next clip opens with speech
+RECAP_FADE_F, RECAP_GAP_F = 18, 30  # the recap fades to black and holds it, so "previously" and the cold open don't blur together
 TALK_GAP, TALK_PAD = 0.6, 0.25  # music bed ducking: speech stretches merged and padded (seconds)
 
 edl = json.load(open(sys.argv[1]))
@@ -30,7 +31,7 @@ work = f"work/{edl['vod']}"
 segments = json.load(open(f"{work}/transcript.json"))["segments"]
 words = [w for s in segments for w in s["words"]]
 rms = np.load(f"{work}/rms100ms.npy")
-said = real_words(words, rms)  # for subtitles: the trim keeps using every word so a ghost never changes a cut
+said = fix_words(real_words(words, rms), edl.get("wordFixes"))  # subtitles: no ghosts, proof-read spellings; the trim keeps every word so a ghost never changes a cut
 ocr_effects = json.load(open(f"{work}/effects.json")) if os.path.exists(f"{work}/effects.json") else []
 events = json.load(open(f"{work}/events.json")) if os.path.exists(f"{work}/events.json") else []
 motion = np.load(f"{work}/motion.npz")["game"] if os.path.exists(f"{work}/motion.npz") else None
@@ -122,6 +123,8 @@ if recap:
         clips.append({"section": "recap", "file": name, "src": src_f, "dur": d, "from": cursor})
         src_f += d
         cursor += d
+    clips[-1]["fade"] = RECAP_FADE_F  # the recap ends on a fade to black and a beat of silence before the episode's own cold open
+    cursor += RECAP_GAP_F
 add("cold", edl["coldOpen"])
 title = {**edl["title"], "from": cursor, "dur": round(TITLE_S * FPS), "bg": round((sec(edl["title"]["bg"]) - OFF) * FPS)}
 cursor += title["dur"]
@@ -333,11 +336,15 @@ def punches():
     return [{"at": f} for f in sorted(out)]
 
 
-# YouTube chapters: first must be 0:00, each at least 10 s apart. Keep the EDL index to pair English labels.
+# YouTube chapters: first must be 0:00, each at least 10 s apart (and editorially ~2 min). Keep the EDL index to pair English labels.
+CHAPTER_MIN_S = 90
 chapters = [(0, 0)]
 for i, (t, label) in enumerate(edl["chapters"][1:], 1):
     f = place(sec(t), snap=30)[0] if t not in ("end",) else end["from"]
     if f / FPS - chapters[-1][0] >= 10:
+        if f / FPS - chapters[-1][0] < CHAPTER_MIN_S:
+            print(f"warning: chapter '{label}' at {t} comes {f / FPS - chapters[-1][0]:.0f} s after the previous one: "
+                  f"a chapter is a story beat of about 2–3 min, so merge it into its neighbour (rule 11.1)")
         chapters.append((f / FPS, i))
     else:
         print(f"warning: chapter '{label}' at {t} lands at {f / FPS:.1f} s, under 10 s after the previous one, and is dropped"

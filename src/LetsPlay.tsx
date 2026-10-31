@@ -27,7 +27,7 @@ const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 
 // A clip of the prepared source (or of `file`: the recap's own cut). `jump`: alternate slight punch-in across a jump cut.
 // `lead`: J-cut, the audio starts this many frames before the picture. Every cut gets an audio crossfade of `xfade` frames.
-type Clip = {section: string; src: number; dur: number; from: number; rate?: number; whoosh?: boolean; jump?: boolean; lead?: number; file?: string};
+type Clip = {section: string; src: number; dur: number; from: number; rate?: number; whoosh?: boolean; jump?: boolean; lead?: number; file?: string; fade?: number};
 type Zoom = (typeof edit.faceZooms)[number];
 type Card = {at: number; dur: number; n: number; label: string};
 type Bed = {track: string; talk: number[][]};
@@ -48,14 +48,19 @@ const ClipView: React.FC<{clip: Clip}> = ({clip}) => {
 	const f = useCurrentFrame();
 	const lead = clip.lead ?? 0;
 	const t = clip.whoosh ? interpolate(f - lead, [0, 14], [1, 0], {...clamp, easing: Easing.out(Easing.cubic)}) : 0;
+	// `fade`: the picture and sound go to black over the clip's last frames (the recap's exit).
+	const fade = clip.fade ? interpolate(f, [lead + clip.dur - clip.fade, lead + clip.dur], [1, 0], clamp) : 1;
+	// The recap is graded apart from the episode: desaturated and a touch darker, under letterbox bars.
+	const look = clip.section === 'recap' ? 'saturate(0.45) contrast(1.08) brightness(0.85)' : '';
 	return (
-		<AbsoluteFill style={{transform: `scale(${(1 + 0.14 * t) * (clip.jump ? 1.05 : 1)})`, filter: t > 0.01 ? `blur(${14 * t}px)` : undefined,
-			opacity: f < lead ? 0 : 1}}>
+		<AbsoluteFill style={{transform: `scale(${(1 + 0.14 * t) * (clip.jump ? 1.05 : 1)})`, filter: (t > 0.01 ? `blur(${14 * t}px) ` : '') + look || undefined,
+			opacity: f < lead ? 0 : fade}}>
 			<OffthreadVideo style={FILL}
 				src={clip.file ? staticFile(clip.file) : src}
 				trimBefore={clip.src - lead}
 				playbackRate={rate(clip)}
-				volume={(vf) => interpolate(vf, [0, lead + XFADE, lead + clip.dur, lead + clip.dur + XFADE], [0, 1, 1, 0], clamp) * (rate(clip) > 1 ? 0.3 : 1)}
+				volume={(vf) => interpolate(vf, [0, lead + XFADE, lead + clip.dur, lead + clip.dur + XFADE], [0, 1, 1, 0], clamp) * (rate(clip) > 1 ? 0.3 : 1)
+					* (clip.fade ? interpolate(vf, [lead + clip.dur - clip.fade, lead + clip.dur], [1, 0], clamp) : 1)}
 			/>
 		</AbsoluteFill>
 	);
@@ -252,6 +257,7 @@ export const LetsPlay: React.FC = () => {
 			</Zoomer>
 			{extra.recap && (
 				<Sequence from={0} durationInFrames={clips.filter((c) => c.section === 'recap').reduce((s, c) => s + c.dur, 0)}>
+					<AbsoluteFill style={{borderTop: '90px solid black', borderBottom: '90px solid black', boxSizing: 'border-box'}} />
 					<RecapTag dur={clips.filter((c) => c.section === 'recap').reduce((s, c) => s + c.dur, 0)} />
 				</Sequence>
 			)}

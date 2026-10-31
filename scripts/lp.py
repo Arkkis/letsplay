@@ -24,7 +24,7 @@ from difflib import SequenceMatcher
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from media import GRADE, video_encoder
-from trimming import MOTION_FPS, loud_db, merge, motion_thr, real_words, trim
+from trimming import MOTION_FPS, fix_words, loud_db, merge, motion_thr, real_words, trim
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import CFG, about_partner, out_dir, text
 
@@ -442,6 +442,59 @@ def script(a):
     print(out, f"{e['duration'] / fps / 60:.1f} min")
 
 
+def proof(a):
+    """Proof-read before `check`: a second Whisper pass over just the line of every caption and the whole of every Short
+    (a fresh decode without the surrounding context), printed beside the transcript's words and the caption text.
+    Caption words heard in neither decode are flagged, and so are transcript words of a Short that the second pass
+    doesn't hear (those become the Short's cues and the subtitles): fix them with "wordFixes" in the EDL or by rewriting
+    the caption. Written to work/<vod>/epN.proof.txt."""
+    edl = json.load(open(a.edl))
+    w = f"work/{edl['vod']}"
+    segments = json.load(open(f"{w}/transcript.json"))["segments"]
+    bare = lambda x: re.sub(r"[^\w]", "", x.lower())
+    items = []  # (label, start, end, transcript words, caption text or None)
+    for t, match, text in edl.get("captions", []):
+        t0 = parse_time(t)
+        near = [s for s in segments if abs(s["start"] - t0) < 8 and match.lower() in s["text"].lower()]
+        if not near:
+            items.append((f"CAPTION {t} '{match}'", None, None, [], text))
+            continue
+        s = min(near, key=lambda s: abs(s["start"] - t0))
+        items.append((f"CAPTION {t}", s["start"], s["end"], [x["word"].strip() for x in s["words"]], text))
+    for k, sh in enumerate(edl.get("shorts", []), 1):
+        for x, y in sh.get("ranges") or [[sh["from"], sh["to"]]]:
+            a0, b0 = parse_time(x), parse_time(y)
+            said = [x["word"].strip() for s in segments for x in s["words"] if a0 <= x["start"] < b0]
+            items.append((f"SHORT {k} ({x}–{y})", a0, b0, said, None))
+    windows = [[max(0.0, s - 0.3), e + 0.4] for _, s, e, _, _ in items if s is not None]
+    tmp = f".tmp/{edl['vod']}-ep{edl['episode']}-proof.json"
+    os.makedirs(".tmp", exist_ok=True)
+    json.dump(windows, open(tmp, "w"))
+    run(PY, "scripts/proof_pass.py", f"{w}/audio16k.wav", tmp, tmp, CFG["language"], env=gpu_env())
+    second = iter(json.load(open(tmp)))
+    lines = []
+    for label, s, e, said, text in items:
+        if s is None:
+            lines += [label, "  !! match word not found within 8 s of its time", ""]
+            continue
+        heard = next(second)
+        lines += [f"{label}  [{fmt(s)}–{fmt(e)}]", f"  transcript: {' '.join(said)}", f"  2nd pass:   {heard}"]
+        pool = {bare(x) for x in said} | {bare(x) for x in heard.split()}
+        if text is not None:
+            lines.append(f"  caption:    {text}")
+            if miss := [x for x in text.split() if bare(x) and bare(x) not in pool]:
+                lines.append(f"  !! not heard in either decode: {' '.join(miss)}")
+        else:
+            h = {bare(x) for x in heard.split()}
+            if diff := [x for x in said if bare(x) and bare(x) not in h]:
+                lines.append(f"  ?? transcript words the 2nd pass doesn't hear (they become cues/subtitles): {' '.join(diff)}")
+        lines.append("")
+    out = f"{w}/ep{edl['episode']}.proof.txt"
+    open(out, "w").write("\n".join(lines))
+    print("\n".join(lines))
+    print(out)
+
+
 def faces(a):
     """Liveliest webcam moments (movement in the face area, 4 fps), one per 20 s, as a contact sheet."""
     p = part(a.slug, a.ep)
@@ -828,8 +881,8 @@ def build_shorts(edl, e):
     vod_time = lambda f: next(((c["src"] + (f - c["from"]) * c.get("rate", 1)) / fps + off for c in e["clips"]
                                if "file" not in c and c["from"] <= f < c["from"] + c["dur"]), None)
     tag = re.sub(r"\s*#\d+$", "", edl["thumb"].get("tag", ""))
-    words = real_words([w for s in json.load(open(f"work/{edl['vod']}/transcript.json"))["segments"] for w in s["words"]],
-                       np.load(f"work/{edl['vod']}/rms100ms.npy"))
+    words = fix_words(real_words([w for s in json.load(open(f"work/{edl['vod']}/transcript.json"))["segments"] for w in s["words"]],
+                                 np.load(f"work/{edl['vod']}/rms100ms.npy")), edl.get("wordFixes"))
     out, problems = [], []
     for k, sh in enumerate(edl.get("shorts", []), 1):
         ranges = [[parse_time(x), parse_time(y)] for x, y in sh.get("ranges") or [[sh["from"], sh["to"]]]]
@@ -1013,11 +1066,11 @@ g = s.add_mutually_exclusive_group(); g.add_argument("--at", help="schedule: ISO
 g.add_argument("--now", action="store_true", help="make public immediately")
 s = sub.add_parser("frames"); s.add_argument("slug"); s.add_argument("times", nargs="+")
 s = sub.add_parser("speakers"); s.add_argument("slug"); s.add_argument("--host", required=True); s.add_argument("--guest", required=True)
-for c in ("check", "script", "shorts", "retention", "render"):
+for c in ("check", "script", "shorts", "retention", "proof", "render"):
     s = sub.add_parser(c); s.add_argument("edl")
 s.add_argument("--patch", nargs="?", const="auto", metavar="RANGES",
                help="re-render only what changed and splice it in: auto (default; diff against the last render), end, "
                     "m:ss-m:ss output-time ranges, comma-separated (e.g. auto,end or 12:30-13:10)")
 a = ap.parse_args()
 {"stats": lambda a: run(PY, "scripts/session_stats.py", a.session), "ingest": ingest, "split": split, "context": context, "draft": draft, "faces": faces, "frames": frames, "prep": prep, "speakers": speakers_cmd,
- "check": check, "render": render, "script": script, "shorts": shorts, "publish": publish, "retention": retention}[a.cmd](a)
+ "check": check, "render": render, "script": script, "proof": proof, "shorts": shorts, "publish": publish, "retention": retention}[a.cmd](a)
