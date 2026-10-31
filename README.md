@@ -5,8 +5,9 @@ splitting, cutscene detection, silence trimming, grading, rendering, loudness, s
 the editing itself is done by [Claude Code](https://claude.com/claude-code) following a project skill, because a program
 can't judge what's funny, what needs its setup, or where a chapter really starts.
 
-Each episode gets: a cold open, title card, intro with a music bed, jump-cut main part, verbatim pop-up captions, face
-and game zooms, banners for on-screen events (GTA V Chaos Mod effects), a "to be continued" freeze, an end screen laid
+Each episode gets: a cold open, title card, intro with a music bed, jump-cut main part, verbatim captions that pop in
+word by word as they are spoken, face and game zooms, automatic punch-ins on loud moments, fast-forward / slow-motion
+ranges (flag a range `"x4"` or `"x0.5"`), banners for on-screen events (GTA V Chaos Mod effects), a "to be continued" freeze, an end screen laid
 out for YouTube's end-screen elements, a thumbnail, a description with chapters and credits, subtitles, an optional
 translated title/description, and 2–4 vertical Shorts. Footage is never upscaled: everything renders at the VOD's
 native resolution.
@@ -43,17 +44,24 @@ fresh Claude Code session took ≈ 11 min and ≈ 44k output tokens.
 
 ## Setup
 
-Requirements: Linux (that's what it's tested on), Python 3.12, Node 20+, a recent ffmpeg (with the `cas` filter). An NVIDIA GPU makes
-transcription and encoding much faster; without one, Whisper runs on the CPU and encoding uses x264.
+Requirements: Python 3.12, Node 20+, a recent ffmpeg (with the `cas` filter). An NVIDIA GPU makes transcription and encoding much
+faster; without one, Whisper runs on the CPU and encoding uses x264. Developed and tested on Linux; the Windows and macOS
+scripts are untested so far.
+
+The install script installs whatever is missing (ffmpeg, Node, Python 3.12), creates `.venv`, installs the Python and Node
+packages, creates `config.json` and downloads the style music (Kevin MacLeod tracks, CC BY 4.0):
 
 ```sh
-python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
-npm install
-cp config.example.json config.json        # your name, VOD folder, language, texts
-sh scripts/fetch_music.sh                 # Kevin MacLeod tracks (CC BY 4.0)
-.venv/bin/python games/chaosmod/build_names.py   # only for GTA V Chaos Mod streams
-npm test
+sh install-deps.sh                        # Linux, macOS
 ```
+```powershell
+powershell -ExecutionPolicy Bypass -File install-deps.ps1   # Windows (uses winget)
+```
+
+Then edit `config.json` (your name, VOD folder, language, texts) and run `npm test`. For GTA V Chaos Mod streams, also run
+`.venv/bin/python games/chaosmod/build_names.py` once (on Windows: `.venv\Scripts\python games\chaosmod\build_names.py`).
+The Windows script writes `.mcp.json` with the Windows venv path, so it shows as modified in git; on Linux and macOS the
+committed file is already right.
 
 YouTube (optional): create a Google Cloud project, enable the YouTube Data API v3, set up an External OAuth consent
 screen in production status, create a Desktop-app OAuth client and save its JSON as
@@ -75,7 +83,8 @@ Use one fresh session per episode: every step re-reads the session's context, so
 much per episode.
 
 Edit files (`edits/*.json`) are plain JSON; `examples/edit-example.json` is a small complete one (it is also the test
-fixture). Styles (`hype`, `horror`, `chill`: colours, caption font, music) are in `src/styles.json`.
+fixture). Styles (`hype`, `horror`, `chill`: headline colour, glitch punch-ins, music) are in `src/styles.json`; the shared look
+(Oswald, yellow/white/cyan stacks, outline and shadow, tilt) is in `src/look.tsx`.
 
 ## Game modules
 

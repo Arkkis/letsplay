@@ -8,6 +8,7 @@ public/*.mp4
 public/music/*.mp3
 # the channel's own settings and episode edits
 config.json
+CLAUDE.local.md
 edits/*.json
 # generated from ChaosModV (GPL-3.0) by games/chaosmod/build_names.py
 games/chaosmod/names.json

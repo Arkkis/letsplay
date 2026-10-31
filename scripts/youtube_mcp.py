@@ -7,7 +7,7 @@ Credentials live in ~/.config/letsplay-youtube/: client_secret.json (Desktop-app
 """
 import glob, json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.config import CFG
+from scripts.config import CFG, out_dir
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -31,7 +31,7 @@ def auth():
 
 def yt():
     if not os.path.exists(TOKEN):
-        raise RuntimeError(f"not signed in: run `{ROOT}/.venv/bin/python {__file__} auth`")
+        raise RuntimeError(f"not signed in: run `{sys.executable} {__file__} auth`")
     creds = Credentials.from_authorized_user_file(TOKEN, SCOPES)
     if not creds.valid:
         creds.refresh(Request())
@@ -41,9 +41,11 @@ def yt():
 
 
 def out_file(output, ext):
-    path = os.path.join(ROOT, "out", f"{output}{ext}")
-    if os.path.dirname(os.path.realpath(path)) != os.path.join(ROOT, "out") or not os.path.exists(path):
-        raise ValueError(f"no such episode file: out/{output}{ext}")
+    edl = episode_edl(output)
+    folder = os.path.join(ROOT, out_dir(edl)) if edl else None
+    path = folder and os.path.join(folder, f"{output}{ext}")
+    if not path or os.path.dirname(os.path.realpath(path)) != os.path.realpath(folder) or not os.path.exists(path):
+        raise ValueError(f"no such episode file: {output}{ext} (out/<playlist>/, from the edit whose output is {output!r})")
     return path
 
 
@@ -118,8 +120,8 @@ def list_videos(limit: int = 10) -> list[dict]:
 
 @server.tool()
 def apply_episode(video_id: str, output: str, tags: list[str] | None = None) -> dict:
-    """Fill an uploaded video from a rendered episode in out/: title = `output`, description (with chapters and credits),
-    thumbnail, subtitles (out/<output>.<language>.srt), translated title/description (out/<output>.<translation>.json),
+    """Fill an uploaded video from a rendered episode in out/<playlist>/: title = `output`, description (with chapters and credits),
+    thumbnail, subtitles (<output>.<language>.srt), translated title/description (<output>.<translation>.json),
     category Gaming, the channel's language, recording date (from the VOD date), not made for kids, no altered content.
     Visibility is untouched. Languages come from config.json."""
     lang, tr = CFG["language"], CFG.get("translation")
@@ -163,9 +165,9 @@ def update_video(video_id: str, title: str | None = None, description: str | Non
 
 @server.tool()
 def set_thumbnail(video_id: str, output: str) -> str:
-    """Set the thumbnail from out/<output>.jpg (max 2 MB)."""
+    """Set the thumbnail from out/<playlist>/<output>.jpg (max 2 MB)."""
     yt().thumbnails().set(videoId=video_id, media_body=MediaFileUpload(out_file(output, ".jpg"), mimetype="image/jpeg")).execute()
-    return f"thumbnail set from out/{output}.jpg"
+    return f"thumbnail set from {os.path.relpath(out_file(output, '.jpg'), ROOT)}"
 
 
 @server.tool()

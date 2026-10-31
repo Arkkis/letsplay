@@ -8,6 +8,12 @@ if not os.path.exists(_path):
 CFG = json.load(open(_path))
 
 
+def out_dir(edl):
+    """Rendered files of one series: out/<playlist>/, Shorts in its shorts/ (relative to the repository root)."""
+    name = edl.get("playlist") if edl.get("playlist") not in (None, "", "TODO") else edl["output"]
+    return os.path.join("out", name.replace("/", "-"))
+
+
 def text(key, **kw):
     """On-screen / description text in the channel's language."""
     return CFG["text"][key].format(**kw)

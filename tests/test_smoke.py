@@ -41,9 +41,9 @@ class Smoke(unittest.TestCase):
             self.assertGreater(e["duration"], 60 * 60)  # content + title + freeze + end screen, over a minute
             self.assertEqual([c["text"] for c in e["captions"]], ["WORD FORTY", "NINETY!"])
             self.assertTrue(all(c["dur"] > 0 for c in e["clips"]))
-            desc = open(os.path.join(d, "out", f"{edl['output']}.description.txt")).read()
+            desc = open(os.path.join(d, "out", edl["playlist"], f"{edl['output']}.description.txt")).read()
             self.assertIn("0:00 Intro", desc)
-            self.assertTrue(os.path.getsize(os.path.join(d, "out", f"{edl['output']}.en.srt")) > 0)
+            self.assertTrue(os.path.getsize(os.path.join(d, "out", edl["playlist"], f"{edl['output']}.en.srt")) > 0)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,11 @@ by you and every edit is reviewed by you before it renders. Never ship a draft a
 1. **ingest** `lp.py ingest "<VOD path>" [--game chaosmod]`: copies to `footage/<slug>.mp4`, Whisper transcript (GPU), 100 ms
    loudness map, spoken language per 10 s (finds cutscenes in another language, ~2 min on a GPU), and with `--game chaosmod` (GTA V Chaos
    Mod streams; run `games/chaosmod/build_names.py` once first) the active-effect OCR (~13 min for a 3.5 h VOD, all CPU cores); everything lands in `work/<slug>/`.
+   **Co-op streams** (a partner's webcam on screen, both voices on one track): run
+   `lp.py speakers <slug> --host x,y,w,h --guest x,y,w,h` with a box over each person's lower face in VOD pixels
+   (find them with `frames`; keep each box off moving HUD such as a minimap, and check a few times across the VOD that
+   the faces stay inside). It reads mouth movement in both webcams (voices can't be told apart) and labels every
+   transcript line; `context` then marks the partner's lines `[GUEST]`, unclear ones `[?]` (~7 min for a 5 h VOD).
 2. **split** `lp.py split <slug> [--target 25] [--parts N]`: episodes of ~25 *edited* minutes each (the 20–30 min sweet spot
    for gaming; ≥8 min allows mid-roll ads). It estimates how much each stretch keeps after trimming, so talky streams get
    longer raw parts than quiet ones, and cuts at a speech pause. `--parts N` fixes the count (speedruns: see below).
@@ -54,8 +59,8 @@ by you and every edit is reviewed by you before it renders. Never ship a draft a
       will meet it: does every cut land on a finished sentence, does each joke get its setup, are there thank-yous or chat
       admin left, do captions/banners/zooms land on the right beat, is anything repeated or confusing? Fix and re-run
       until it reads like a finished episode.
-   8. `lp.py render edits/<slug>-epN.json` → `out/<output>.mp4` (≈ 17–27 min), `out/<output>.jpg` (thumbnail),
-      `out/<output>.description.txt`, `.<language>.srt`, `.<translation>.json`, and the Shorts in `out/shorts/` (~25 s each to render). Check the printed loudness is about −14 LUFS and look at
+   8. `lp.py render edits/<slug>-epN.json` → `out/<playlist>/<output>.mp4` (≈ 17–27 min), `<output>.jpg` (thumbnail),
+      `<output>.description.txt`, `.<language>.srt`, `.<translation>.json`, and the Shorts in `out/<playlist>/shorts/` (~25 s each to render). Check the printed loudness is about −14 LUFS and look at
       the thumbnail. Later fixes: `--patch` (see below), never a full re-render.
 4. Report: per episode the file, length, and anything the user must know in a clause. Never upload video files.
 5. **YouTube**: the user uploads the mp4 in Studio. `lp.py publish edits/<slug>-epN.json` (run in the background) waits for
@@ -95,9 +100,9 @@ Decide per VOD from its title and a look at `frames`/`context`:
 
 | Content | `style` | `mode` | Notes |
 |---|---|---|---|
-| Comedy, chaos, randomizers, co-op, most games | `hype` | – | purple/yellow, funk intro |
-| Horror (Phasmophobia, SCP, Forewarned, Yume Nikki) | `horror` | – | dark red/bone, eerie music, glitch title; captions in Anton |
-| Calm or cosy (PowerWash, Subnautica, chatting streams) | `chill` | – | teal/warm, light music, no glitch effect |
+| Comedy, chaos, randomizers, co-op, most games | `hype` | – | yellow headlines, funk intro |
+| Horror (Phasmophobia, SCP, Forewarned, Yume Nikki) | `horror` | – | bone-white headlines, eerie music, glitch punch-ins |
+| Calm or cosy (PowerWash, Subnautica, chatting streams) | `chill` | – | warm-yellow headlines, light music, no glitch effect |
 | Speedrun / PB / runtime VODs | any (usually `hype`) | `speedrun` | `split --parts 1` (or one part per run); the run itself is never jump-cut |
 
 - **Speedrun mode** keeps every range whole (no silence trimming). Cut only before and after the run, plus long pre-run
@@ -122,10 +127,12 @@ All times are VOD times as `m:ss[.s]` (minutes may exceed 59, e.g. `62:18`). See
  "thumb": {"bg": "48:10.0", "face": "51:02.5", "bgZoom": 1.25, "bgOrigin": "62% 45%", "tag": "EXAMPLE GAME #1", "text": "IT ALL GOES WRONG"},
  "title": {"kicker": "EXAMPLE", "title": "GAME", "episode": "PART 1", "tagline": "...", "bg": "48:10"},
  "lowerThird": {"at": "24:40.0", "text": "YourName", "sub": "Example Game · Twitch stream 31.1.2024"},
+                                       // optional: "side": "right" (tag over a bottom-right webcam), "guest": {"text", "sub"} = co-op partner's tag on the other side
  "coldOpen": [["21:05.0", "21:19.5", "full"]],   // ranges; "full" = keep as is, otherwise silences are jump-cut
  "intro":    [["24:30.0", "25:35.0"]],           // music bed under it; the title card sits between coldOpen and intro
  "main":     [["3:40.0", "4:05.5"], ...],         // chronological
  "effects":  [["4:29", "Heavy Recoil", "Guns kick like a mule"]],   // rough time, mod effect name (as in context), one-line description ("" = from the library)
+ "effectLabel": "ARVONTA",             // optional: hand-placed banners without a game module; times are exact, description required
  "captions": [["5:34", "minimap", "I CAN'T SEE MY MINIMAP AT ALL"]], // rough time, a word in the transcript segment, verbatim caps text
  "faceZooms": ["7:28"], "gameZooms": ["17:15"],
  "chapters": [["0:00", "Intro"], ["3:40", "The chaos begins"]],
@@ -139,7 +146,9 @@ All times are VOD times as `m:ss[.s]` (minutes may exceed 59, e.g. `62:18`). See
 ```
 
 Only footage inside the episode's part range (`work/<slug>/parts.json`) exists in the prepared source.
-For non-chaos streams leave `effects` empty and drop "--chaos"; the badge is chaos-mod specific.
+Without a game module leave `effects` empty. `"effectLabel"` (hand-placed banners: exact time, 1–3 word name, one-line
+description) exists for a game event viewers can't read from the screen; don't use it for randomizers or anything the
+game already shows: extra cards there only confuse.
 The last episode of a VOD gets an end screen without "part N+1 coming" (`draft` uses the config's `thanks` text).
 
 ## Shorts
@@ -152,6 +161,9 @@ the episode's captions and banners inside the stretch, and the config's `full_ep
   The first second has to grab: start on the action or the reaction, not on a lead-in sentence.
 - Pick moments that work without context: a visual gag, a big reaction, a quotable line. The episode's cold open is
   usually one.
+- On co-op streams the Short must be the streamer's own moment: the partner's gameplay isn't in this stream, so a Short
+  built on their story or reaction shows nothing of it. `check` refuses a Short where `[GUEST]` lines are over a third of
+  the talking.
 - `title`: 2–4 words in caps that tease the payoff without giving it away ("WHO'S IN THE BACK SEAT?!").
 - `cropX` (0–840, default 420 = centre) moves the 1080-unit-wide game window when the action is off-centre;
   check with `frames`.
@@ -165,7 +177,12 @@ the episode's captions and banners inside the stretch, and the config's `full_ep
 - Range boundaries must not slice words: start just after a sentence ends, end after one; `build_edit` also snaps to word edges.
 - The same location or moment must not appear in both intro/cold open and main: remove it from `main`.
 - Avoid clips under 2 s (the build merges them where it can; it reports the count).
-- Face zooms on genuine reactions only, at least 4 s apart, never covering the gag they react to.
+- Face zooms only where the streamer's face is funny or strange (look at it with `frames` first), or right as they say
+  something funny. Not on routine talk, at least 4 s apart, never covering the gag they react to.
+- **Co-op streams: follow the streamer.** The partner's gameplay isn't in this stream, so their story about their own
+  game shows nothing: cut long `[GUEST]` stretches unless they set up the streamer's moment. No captions or banners on
+  `[GUEST]` lines (`check` refuses them), no face zoom there unless the streamer's own face is the joke (it warns),
+  automatic punch-ins skip them, and Shorts are the streamer's own moments.
 - Captions only for the best lines (~2 per minute max); overlapping ones stack automatically.
 - Effect names are the mod's names as printed in the context file; the build snaps the badge to the OCR activation time.
   Banners need ≥ 4 s between them (they don't stack).
@@ -173,7 +190,12 @@ the episode's captions and banners inside the stretch, and the config's `full_ep
   beat starts in the edit (the draft's `TODO (near X)` times are only candidates; check them in the script).
 - When two effects activate together, the banner shows the one the commentary reacts to.
 - Thank-yous to chat (follows, subs, votes) go; a sarcastic "kiitos" to the game can stay.
-- Thumbnail: bright, readable game frame (`bg`) + an expressive webcam frame (`face`), 2–4 words of text.
+- Thumbnail: bright, readable game frame (`bg`) + an expressive webcam frame (`face`), 2–4 words of hook that say what
+  happened (the title already names the series and part). `scripts/thumb_plan.py` (run by every build) splits the hook into
+  lines of at most 9 letters, so rewrite a hook whose word is longer; it cuts the webcam out (the build stops if the cut-out
+  comes out see-through: pick another `face`), zooms the background until the stream's webcam leaves it (keep `bgOrigin`
+  up and left of the webcam), and measures readability: darkening behind the text, white instead of the headline colour
+  on bright or yellow backgrounds, a plate behind the tag. Its printed line shows what it decided.
 
 ## Changing a rendered episode: patch, never re-render everything
 

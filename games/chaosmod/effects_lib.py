@@ -8,7 +8,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 NAMES_PATH = os.path.join(HERE, "names.json")
 DESC_PATH = os.path.join(HERE, f"descriptions.{CFG['language']}.json")
 if not os.path.exists(NAMES_PATH):
-    raise SystemExit(f"{NAMES_PATH} missing: run `.venv/bin/python games/chaosmod/build_names.py` once")
+    raise SystemExit(f"{NAMES_PATH} missing: run `games/chaosmod/build_names.py` once with the venv's Python")
 NAMES = json.load(open(NAMES_PATH))
 DESC = json.load(open(DESC_PATH)) if os.path.exists(DESC_PATH) else {}
 

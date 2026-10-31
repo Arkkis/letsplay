@@ -3,6 +3,7 @@
   lp.py ingest <vod.mp4> [--slug S] [--game G]  copy VOD, transcribe, loudness map, language per 10 s (+ game module,
                                                 e.g. --game chaosmod: GTA V Chaos Mod effect OCR)
   lp.py split <slug> [--target 25] [--parts N]  split into episodes of ~target edited minutes at speech gaps → work/<slug>/parts.json
+  lp.py speakers <slug> --host B --guest B      co-op stream with two webcams: who says each line (B = x,y,w,h lower-face box)
   lp.py context <slug> <ep>                     transcript + effects + English stretches + loud moments, for writing the EDL
   lp.py draft <slug> <ep> [--force]             first-pass EDL: ranges without cutscenes, effects with names, chapters, metadata
   lp.py faces <slug> <ep>                       contact sheet of the episode's liveliest webcam moments (thumbnail face)
@@ -10,8 +11,8 @@
   lp.py prep <slug> <ep|all>                    graded episode source at native resolution → public/<slug>-ep<ep>.mp4
   lp.py check <edits/x.json>                    build the timeline and render a grid of check stills
   lp.py script <edits/x.json>                   the finished edit as a timed script (speech, cuts, captions, banners) to review
-  lp.py shorts <edits/x.json>                   (re)render the EDL's Shorts → out/shorts/ (a full render does this too)
-  lp.py render <edits/x.json> [--patch [R]]     build, render, master to −14 LUFS, thumbnail → out/<output>.{mp4,jpg,description.txt}
+  lp.py shorts <edits/x.json>                   (re)render the EDL's Shorts → out/<playlist>/shorts/ (a full render does this too)
+  lp.py render <edits/x.json> [--patch [R]]     build, render, master to −14 LUFS, thumbnail → out/<playlist>/<output>.{mp4,jpg,description.txt}
                                                 --patch: re-render only changed parts and splice them into the existing mp4
   lp.py stats <session-id>                      token use, wall time and tool activity of a Claude Code session
   lp.py publish <edits/x.json> [--at ISO|--now] wait for the user's Studio upload, then apply details, subtitles, playlist;
@@ -23,11 +24,11 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from trimming import loud_db, merge, trim
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.config import CFG, text
+from scripts.config import CFG, out_dir, text
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
-PY = f"{ROOT}/.venv/bin/python"
+PY = sys.executable  # the venv's interpreter: the driver is run as .venv/bin/python (Linux, macOS) or .venv\Scripts\python (Windows)
 TMP = f"{ROOT}/.tmp"  # Remotion copies public/ into TMPDIR; /tmp is a small RAM disk
 PREP_BEFORE, PREP_AFTER = 5, 15  # source margin around an episode, seconds
 LOUD_DB = -20
@@ -47,6 +48,10 @@ def game_lib(slug):
 def gpu_env():
     """CUDA libraries shipped as pip wheels (nvidia-cublas/cudnn) for faster-whisper, when present."""
     import glob
+    if os.name == "nt":  # Windows wheels put the DLLs in nvidia/*/bin and load them through PATH
+        key = next((k for k in os.environ if k.upper() == "PATH"), "PATH")
+        libs = glob.glob(f"{sys.prefix}/Lib/site-packages/nvidia/*/bin")
+        return {key: os.pathsep.join(libs + [os.environ.get(key, "")])} if libs else {}
     libs = glob.glob(f"{sys.prefix}/lib/python3*/site-packages/nvidia/*/lib")
     return {"LD_LIBRARY_PATH": ":".join(libs + [os.environ.get("LD_LIBRARY_PATH", "")])} if libs else {}
 
@@ -214,13 +219,16 @@ def context(a):
     w, p = f"work/{a.slug}", part(a.slug, a.ep)
     lo, hi = p["start"], p["end"]
     segments = [s for s in json.load(open(f"{w}/transcript.json"))["segments"] if lo <= s["start"] < hi]
-    talk = []  # speech merged into utterances (segments < 1 s apart); the end time is where a cut after it can go
+    spk = speakers(a.slug)
+    talk = []  # speech merged into utterances (same speaker, < 1 s apart); the end time is where a cut after it can go
     for x in segments:
-        if talk and x["start"] - talk[-1][1] < 1.0:
-            talk[-1][1:] = [x["end"], talk[-1][2] + " " + x["text"]]
+        who = spk.get(x["start"], "host")
+        if talk and x["start"] - talk[-1][1] < 1.0 and who == talk[-1][3]:
+            talk[-1][1:3] = [x["end"], talk[-1][2] + " " + x["text"]]
         else:
-            talk.append([x["start"], x["end"], x["text"]])
-    rows = [(x, f"–{fmt(y)} {text}") for x, y, text in talk]
+            talk.append([x["start"], x["end"], x["text"], who])
+    mark = {"host": "", "guest": "[GUEST] ", "?": "[?] "}
+    rows = [(x, f"–{fmt(y)} {mark[who]}{text}") for x, y, text, who in talk]
     lib = game_lib(a.slug)
     rows += [(t, f"[EFFECT] {n} — {lib.desc(n) or '(no description yet)'}") for t, n in effect_events(a.slug, lo, hi)]
     rows += [(x, f"[{lang.upper()} {fmt(x)}–{fmt(y)}] cutscene or mission dialogue; transcript lines here are unreliable")
@@ -235,9 +243,31 @@ def context(a):
     with open(out, "w") as fh:
         fh.write(f"# episode {a.ep}: VOD {fmt(lo)}–{fmt(hi)} ({(hi - lo) / 60:.1f} min raw). Times are VOD m:ss; speech lines "
                  "show start –end. [EFFECT] lists what OCR read; effects it missed (flipped/hidden HUD) are still on the vote "
-                 "list in `frames` — look names up in games/chaosmod/names.json.\n")
+                 "list in `frames` — look names up in games/chaosmod/names.json."
+                 + (" [GUEST] lines are the co-op partner talking (their gameplay is not in this stream), [?] unclear."
+                    if spk else "") + "\n")
         fh.writelines(f"{fmt(t)} {txt}\n" for t, txt in sorted(rows))
     print(out, len(rows), "lines")
+
+
+def speakers(slug):
+    """Transcript segment start → "host" / "guest" / "?" from `lp.py speakers`; {} for single-streamer VODs."""
+    path = f"work/{slug}/speakers.json"
+    return {x["start"]: x["spk"] for x in json.load(open(path))["segments"]} if os.path.exists(path) else {}
+
+
+def guest_share(slug, a, b):
+    """Share of the talking in VOD a–b done by the co-op guest (by duration)."""
+    path = f"work/{slug}/speakers.json"
+    if not os.path.exists(path):
+        return 0.0
+    segs = [x for x in json.load(open(path))["segments"] if a <= x["start"] < b and x["spk"] != "?"]
+    total = sum(x["end"] - x["start"] for x in segs)
+    return sum(x["end"] - x["start"] for x in segs if x["spk"] == "guest") / total if total else 0.0
+
+
+def speakers_cmd(a):
+    run(PY, "scripts/speakers.py", a.slug, a.host, a.guest)
 
 
 def sibling_edl(slug, ep):
@@ -275,7 +305,7 @@ def draft(a):
             effects.append([fmt(t), name, game_lib(a.slug).desc(name) or "TODO"])
             last_t = t
     chapters, last_c = [["0:00", "Intro"]], -999
-    for t, name, text in effects:
+    for t, name, _ in effects:
         tt = sum(float(v) * 60 ** i for i, v in enumerate(reversed(t.split(":"))))
         if tt - last_c >= 90:  # a candidate only: the editor moves it to where the story beat starts and names it
             chapters.append([t, f"TODO (near {name})"])
@@ -311,19 +341,21 @@ def script(a):
     edl, e = build(a.edl)
     fps, w = e["fps"], f"work/{edl['vod']}"
     off = part(edl["vod"], edl["episode"])["prepStart"]
-    words = [x for s in json.load(open(f"{w}/transcript.json"))["segments"] for x in s["words"]]
+    segments, spk = json.load(open(f"{w}/transcript.json"))["segments"], speakers(edl["vod"])
     rows = []
     for c in e["clips"]:
-        a0, a1 = c["src"] / fps + off, (c["src"] + c["dur"]) / fps + off
-        said = " ".join(x["word"].strip() for x in words if a0 <= x["start"] < a1)
-        cut = "~~ whoosh ~~ " if c.get("whoosh") else "| "
+        a0, a1 = c["src"] / fps + off, (c["src"] + c["dur"] * c.get("rate", 1)) / fps + off
+        said = " ".join(("[GUEST] " if spk.get(s["start"]) == "guest" else "") + " ".join(x["word"].strip() for x in s["words"] if a0 <= x["start"] < a1)
+                        for s in segments if any(a0 <= x["start"] < a1 for x in s["words"]))
+        cut = ("~~ whoosh ~~ " if c.get("whoosh") else "| ") + (f"(x{c['rate']:g}) " if "rate" in c else "")
         rows.append((c["from"], f"{cut}[{c['section']} {fmt(a0)}] {said}"))
     rows += [(c["at"], f"   CAPTION {c['text']}") for c in e["captions"]]
     rows += [(x["at"], f"   BANNER {x['name']} — {x['fi']}") for x in e["effects"]]
     rows += [(z["at"], "   FACE ZOOM") for z in e["faceZooms"]] + [(z["at"], "   GAME ZOOM") for z in e["gameZooms"]]
+    rows += [(p["at"], "   PUNCH") for p in e.get("punches", [])]
     rows += [(e["title"]["from"], "== TITLE CARD =="), (e["lowerThird"]["from"], "   LOWER THIRD"),
              (e["freeze"]["from"], f"== FREEZE {e['freeze']['text']} =="), (e["end"]["from"], "== END SCREEN ==")]
-    desc = open(f"out/{edl['output']}.description.txt").read()
+    desc = open(f"{out_dir(edl)}/{edl['output']}.description.txt").read()
     rows += [(round(sum(float(v) * 60 ** i for i, v in enumerate(reversed(m[0].split(":")))) * fps), f"## CHAPTER {m[1]}")
              for m in re.findall(r"^(\d+:\d\d) (.+)$", desc, re.M)]
     out = f"{w}/ep{edl['episode']}.script.txt"
@@ -335,8 +367,11 @@ def script(a):
 def faces(a):
     """Liveliest webcam moments (movement in the face area, 4 fps), one per 20 s, as a contact sheet."""
     p = part(a.slug, a.ep)
-    sib = sibling_edl(a.slug, 0) or {}
-    x, y, cw, ch = sib.get("cam") or [990, 480, 290, 240]
+    own = f"edits/{a.slug}-ep{a.ep}.json"  # this episode's cam first: siblings may not exist yet when episodes run in parallel
+    sib = (json.load(open(own)) if os.path.exists(own) else None) or sibling_edl(a.slug, a.ep) or {}
+    if not sib.get("cam"):
+        sys.exit(f"no \"cam\" in {own} or a sibling EDL: set it (webcam rect in VOD pixels) before running faces")
+    x, y, cw, ch = sib["cam"]
     fx, fy, fw, fh = x + cw // 6, y + ch // 12, cw * 2 // 3, ch * 2 // 3  # face region inside the cam
     proc = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-ss", str(p["start"]), "-t", str(p["end"] - p["start"]), "-i",
                              f"footage/{a.slug}.mp4", "-vf", f"fps=4,crop={fw}:{fh}:{fx}:{fy},format=gray", "-f", "rawvideo", "-"],
@@ -398,15 +433,18 @@ def prep(a):
     if os.path.exists(out):
         return print(out, "exists")
     off, dur = p["prepStart"], p["prepEnd"] - p["prepStart"]
-    run("scripts/prep_source.sh", f"footage/{a.slug}.mp4", off, dur, out + ".part.mp4",
+    # native resolution, never upscaled: lift shadows, light sharpening
+    run("ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-ss", off, "-t", dur, "-i", f"footage/{a.slug}.mp4",
+        "-vf", "curves=master='0/0 0.12/0.17 0.35/0.42 0.7/0.74 1/1',eq=saturation=1.08,cas=0.3",
         "-map", "0:v", "-map", "0:a", *video_encoder(), "-g", 60, "-c:a", "aac", "-b:a", "256k",
-        "-movflags", "+faststart", "-f", "mp4")
+        "-movflags", "+faststart", "-f", "mp4", out + ".part.mp4")
     os.rename(out + ".part.mp4", out)
 
 
 def build(edl_path):
     run(PY, "scripts/build_edit.py", edl_path)
     edl = json.load(open(edl_path))
+    run(PY, "scripts/thumb_plan.py", props_path(edl), edl_path)  # webcam cut-out + thumbnail readability
     return edl, json.load(open(props_path(edl)))["edit"]
 
 
@@ -455,7 +493,7 @@ SFX_TAIL = 120  # frames a sound effect may ring on after its element ends
 
 def render(a):
     edl, e = build(a.edl)
-    out = f"out/{edl['output']}"
+    out = f"{out_dir(edl)}/{edl['output']}"
     common = (f"--concurrency={CONCURRENCY}", f"--scale={scale(edl)}")
     ranges = a.patch and patch_ranges(edl, e, a.patch)
     if ranges:
@@ -494,7 +532,8 @@ def item_spans(e):
     for i, c in enumerate(e["clips"]):
         spans.append((f"clip{i}", c, c["from"] - (20 if c.get("whoosh") else 0), c["from"] + c["dur"]))
     for k, n in (("effects", 212), ("captions", 132)):
-        spans += [(f"{k}{i}", x, x["at"], x["at"] + n) for i, x in enumerate(e[k])]
+        spans += [(f"{k}{i}", x, x["at"], x["at"] + x.get("dur", n)) for i, x in enumerate(e[k])]
+    spans += [(f"punch{i}", p, p["at"] - 2, p["at"] + 20) for i, p in enumerate(e.get("punches", []))]
     for k, pre, post in (("faceZooms", 7, 14), ("gameZooms", 18, 24)):
         spans += [(f"{k}{i}", z, z["at"] - pre, z["end"] + post) for i, z in enumerate(e[k])]
     t = e["title"]
@@ -508,7 +547,7 @@ def patch_ranges(edl, e, spec):
     """Output frame ranges to re-render: changed timeline elements (auto), 'end' (freeze + end screen) and/or explicit
     m:ss-m:ss output-time ranges for changes that are not in the timeline data (component design, styles).
     None means a full render is needed."""
-    if not os.path.exists(f"out/{edl['output']}.mp4") or not os.path.exists(state_path(edl, "mix.wav")):
+    if not os.path.exists(f"{out_dir(edl)}/{edl['output']}.mp4") or not os.path.exists(state_path(edl, "mix.wav")):
         print("no previous render with a kept mix: full render")
         return None
     ranges, fps = [], e["fps"]
@@ -622,22 +661,24 @@ LINK_TODO = "(link)"  # replaced by the episode's URL once it is known
 SHORT_MIN, SHORT_MAX = 8, 60  # seconds; under a minute is where Shorts perform best
 
 
-def effect_label(slug):
-    """The banner's small label, from the game module (e.g. "CHAOS EFFECT"), or ''."""
-    if not game_lib(slug):
+def effect_label(edl):
+    """The banner's small label: the EDL's own (hand-placed banners), else the game module's (e.g. "CHAOS EFFECT"), or ''."""
+    if edl.get("effectLabel"):
+        return edl["effectLabel"]
+    if not game_lib(edl["vod"]):
         return ""
     labels = json.load(open("games/chaosmod/labels.json"))
     return labels.get(CFG["language"], labels["en"])
 
 
 def short_name(edl, k):
-    return f"out/shorts/{edl['output']} - Short {k}"
+    return f"{out_dir(edl)}/shorts/{edl['output']} - Short {k}"
 
 
 def build_shorts(edl, e):
     """Props for each Short in the EDL: a continuous VOD stretch, with the episode's captions and banners that fall in it."""
     fps, off = e["fps"], part(edl["vod"], edl["episode"])["prepStart"]
-    vod_time = lambda f: next(((c["src"] + f - c["from"]) / fps + off for c in e["clips"] if c["from"] <= f < c["from"] + c["dur"]), None)
+    vod_time = lambda f: next(((c["src"] + (f - c["from"]) * c.get("rate", 1)) / fps + off for c in e["clips"] if c["from"] <= f < c["from"] + c["dur"]), None)
     tag = re.sub(r"\s*#\d+$", "", edl["thumb"].get("tag", ""))
     out, problems = [], []
     for k, sh in enumerate(edl.get("shorts", []), 1):
@@ -645,6 +686,10 @@ def build_shorts(edl, e):
         p = part(edl["vod"], edl["episode"])
         if not SHORT_MIN <= b - a <= SHORT_MAX or a < p["prepStart"] or b > p["prepEnd"]:
             problems.append(f"short {k} ({sh['from']}–{sh['to']}): must be {SHORT_MIN}–{SHORT_MAX} s inside this episode's footage")
+            continue
+        if (g := guest_share(edl["vod"], a, b)) > 0.35:
+            problems.append(f"short {k} ({sh['from']}–{sh['to']}): {g:.0%} of the talking is the co-op guest, whose gameplay "
+                            "isn't in this stream; pick a moment of the streamer's own")
             continue
         def inside(items, key):
             seen, res = set(), []
@@ -658,7 +703,7 @@ def build_shorts(edl, e):
                               "dur": round((b - a) * fps), "cropX": sh.get("cropX", 420), "cam": e["cam"], "title": sh["title"],
                               "tag": tag, "cta": text("full_episode", episode=edl["title"].get("episode", "")).strip(),
                               "text": {"channel": CFG["channel"], "from_stream": text("from_stream"),
-                                       "effect_label": effect_label(edl["vod"])},
+                                       "effect_label": effect_label(edl)},
                               "captions": inside(e["captions"], "text"), "effects": inside(e["effects"], "name")}})
     return out, problems
 
@@ -667,7 +712,7 @@ def render_shorts(edl, e):
     shorts, problems = build_shorts(edl, e)
     if problems:
         sys.exit("\n".join(problems))
-    os.makedirs("out/shorts", exist_ok=True)
+    os.makedirs(f"{out_dir(edl)}/shorts", exist_ok=True)
     yt_id = json.load(open(state_path(edl, "youtube.json")))["id"] if os.path.exists(state_path(edl, "youtube.json")) else None
     for k, props in enumerate(shorts, 1):
         pf, name = state_path(edl, f"short{k}.props.json"), short_name(edl, k)
@@ -697,7 +742,7 @@ def publish(a):
     only with --at/--now, which the user must have asked for."""
     import youtube_mcp as yt
     edl = json.load(open(a.edl))
-    out, state = f"out/{edl['output']}.mp4", state_path(edl, "youtube.json")
+    out, state = f"{out_dir(edl)}/{edl['output']}.mp4", state_path(edl, "youtube.json")
     length = probe_duration(out)
     vid = json.load(open(state))["id"] if os.path.exists(state) else None
     taken = {json.load(open(f"work/{d}/{f}"))["id"] for d in os.listdir("work") if os.path.isdir(f"work/{d}")
@@ -766,11 +811,12 @@ s = sub.add_parser("publish"); s.add_argument("edl")
 g = s.add_mutually_exclusive_group(); g.add_argument("--at", help="schedule: ISO time, e.g. 2026-10-30T16:00:00+02:00")
 g.add_argument("--now", action="store_true", help="make public immediately")
 s = sub.add_parser("frames"); s.add_argument("slug"); s.add_argument("times", nargs="+")
+s = sub.add_parser("speakers"); s.add_argument("slug"); s.add_argument("--host", required=True); s.add_argument("--guest", required=True)
 for c in ("check", "script", "shorts", "render"):
     s = sub.add_parser(c); s.add_argument("edl")
 s.add_argument("--patch", nargs="?", const="auto", metavar="RANGES",
                help="re-render only what changed and splice it in: auto (default; diff against the last render), end, "
                     "m:ss-m:ss output-time ranges, comma-separated (e.g. auto,end or 12:30-13:10)")
 a = ap.parse_args()
-{"stats": lambda a: run(PY, "scripts/session_stats.py", a.session), "ingest": ingest, "split": split, "context": context, "draft": draft, "faces": faces, "frames": frames, "prep": prep,
+{"stats": lambda a: run(PY, "scripts/session_stats.py", a.session), "ingest": ingest, "split": split, "context": context, "draft": draft, "faces": faces, "frames": frames, "prep": prep, "speakers": speakers_cmd,
  "check": check, "render": render, "script": script, "shorts": shorts, "publish": publish}[a.cmd](a)
