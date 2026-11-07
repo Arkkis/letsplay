@@ -1,20 +1,22 @@
 import React from 'react';
 import {
-	AbsoluteFill, Audio, getInputProps, interpolate, OffthreadVideo, Sequence, spring, staticFile,
+	AbsoluteFill, Audio, Freeze, getInputProps, interpolate, OffthreadVideo, Sequence, spring, staticFile,
 	useCurrentFrame, useVideoConfig,
 } from 'remotion';
 import styles from './styles.json';
 import {KineticWords} from './Kinetic';
 import {CYAN, lineStyle, Stack, WHITE} from './look';
+import {Guest, GuestView, povAt, povGain, povOverlaps, sourceAt, Track, TrackView} from './Pov';
 
 // A vertical Short cut from an episode's prepared source. Laid out at 1080x1920 and rendered at 2/3 scale (720x1280),
 // where the 1920x1080-unit source frame shows at its native 1280x720: the game window and webcam are never upscaled.
 // One or two clips (an internal cut); every spoken word captioned, the episode's own captions shown big.
 export type ShortProps = {
-	source: string; fps: number; style: string; clips: {src: number; dur: number; from: number}[]; dur: number; cropX: number;
+	source: string; fps: number; style: string; clips: {src: number; dur: number; from: number}[]; dur: number; hold?: number; cropX: number;
 	cam: number[] | null; title: string; tag: string; cta: string;
 	captions: {at: number; text: string; words?: number[]; dur?: number; big?: boolean}[]; effects: {at: number; name: string; fi: string}[];
-	text: {channel: string; from_stream: string; effect_label: string};
+	text: {channel: string; from_stream: string; effect_label: string; partner?: {text: string; sub?: string}}; guest?: Guest; // co-op: the partner's view in "pov" spans
+	tracks?: Track[] | null; // separate recordings: webcams as their own files (your webcam shown, the partner's heard)
 };
 export const shortProps = (getInputProps() as {short?: ShortProps}).short ?? {
 	source: 'preview.mp4', fps: 60, style: 'hype', clips: [{src: 0, dur: 600, from: 0}], dur: 600, cropX: 420, cam: [1485, 720, 435, 360],
@@ -40,17 +42,43 @@ const Caption: React.FC<{text: string; words?: number[]; dur: number; i: number;
 	);
 };
 
+// The end: the last frame held (as the episode's end freeze: slow push-in, colour draining) under the call to the full
+// episode, so the Short doesn't stop dead on its last word.
+const Hold: React.FC<{children: (style: React.CSSProperties) => React.ReactNode}> = ({children}) => {
+	const f = useCurrentFrame();
+	return (
+		<div style={{position: 'absolute', inset: 0, transform: `scale(${1 + f * 0.0012})`, transformOrigin: '50% 40%',
+			filter: `saturate(${interpolate(f, [0, 20], [1, 0.3], clamp)}) contrast(1.1)`}}>
+			<Freeze frame={0}>{children({width: 1920, height: 1080})}</Freeze>
+		</div>
+	);
+};
+
 export const Short: React.FC = () => {
 	const p = shortProps;
 	const HEAD = styles[p.style as keyof typeof styles].headline;
 	const f = useCurrentFrame();
 	const {fps} = useVideoConfig();
 	const src = staticFile(p.source);
-	const ctaIn = spring({frame: f - (p.dur - 150), fps, config: {damping: 15}});
-	const game = (c: {src: number; dur: number}, style: React.CSSProperties, muted = false) => (
-		<OffthreadVideo src={src} trimBefore={c.src} muted={muted} style={{width: 1920, height: 1080, ...style}}
-			volume={muted ? 0 : (v) => interpolate(v, [0, XFADE, c.dur, c.dur + XFADE], [0, 1, 1, 0], clamp)} />
-	);
+	const hold = p.hold ?? 0;
+	const last = p.clips[p.clips.length - 1];
+	const lastSrc = last.src + last.dur - 1;
+	const now = p.clips.find((c) => f >= c.from && f < c.from + c.dur);
+	// the label names whoever's view and webcam are on screen: the partner's tag inside "pov" spans
+	const partner = p.text.partner && povAt(p.guest, now ? now.src + f - now.from : lastSrc) ? p.text.partner : null;
+	const ctaIn = spring({frame: f - (p.dur - hold - 150), fps, config: {damping: 15}});
+	const game = (c: {src: number; dur: number; from: number}, style: React.CSSProperties, muted = false) => {
+		const volume = (v: number) => interpolate(v, [0, XFADE, c.dur, c.dur + XFADE], [0, 1, 1, 0], clamp);
+		const pov = povOverlaps(p.guest, c.src, c.src + c.dur + XFADE);
+		const s = {width: 1920, height: 1080, ...style};
+		return (
+			<>
+				<OffthreadVideo src={src} trimBefore={c.src} muted={muted} style={s}
+					volume={muted ? 0 : (v) => volume(v) * (pov ? 1 - povGain(p.guest, c.src + v) : 1)} />
+				{pov && <GuestView g={p.guest} f={f - c.from} trimBefore={c.src} rate={1} style={s} volume={volume} muted={muted} />}
+			</>
+		);
+	};
 	return (
 		<AbsoluteFill style={{background: 'linear-gradient(180deg, #14161c 0%, #0b0b0f 100%)', overflow: 'hidden'}}>
 			{/* Hook, as on the thumbnail: the first frame works as the Shorts-feed cover */}
@@ -63,15 +91,55 @@ export const Short: React.FC = () => {
 					</div>
 				</Sequence>
 			))}
-			{/* Webcam at its native size, no frame */}
-			{p.cam && p.clips.map((c, i) => (
-				<Sequence key={`w${i}`} from={c.from} durationInFrames={c.dur} layout="none">
-					<div style={{position: 'absolute', top: GAME.top + GAME.size + 40, right: 40, width: p.cam![2], height: p.cam![3], overflow: 'hidden'}}>
-						<div style={{position: 'absolute', left: -p.cam![0], top: -p.cam![1], width: 1920, height: 1080}}>{game(c, {}, true)}</div>
+			{hold > 0 && (
+				<Sequence from={last.from + last.dur} durationInFrames={hold} layout="none">
+					<div style={{position: 'absolute', top: GAME.top, left: 0, width: GAME.size, height: GAME.size, overflow: 'hidden'}}>
+						<Hold>{(st) => (
+							<div style={{position: 'absolute', left: -p.cropX, top: 0, width: 1920, height: 1080}}>
+								<OffthreadVideo src={sourceAt(p.guest, src, lastSrc)} trimBefore={lastSrc} muted style={st} />
+							</div>
+						)}</Hold>
 					</div>
 				</Sequence>
-			))}
-			<Stack still style={{left: 70, top: GAME.top + GAME.size + 90}} lines={[{text: p.text.channel, color: WHITE, size: 96}, {text: p.text.from_stream, color: CYAN, size: 42}]} />
+			)}
+			{/* Webcam at its native size, no frame */}
+			{p.cam && p.clips.map((c, i) => {
+				const slot = {position: 'absolute', top: GAME.top + GAME.size + 40, right: 40, width: p.cam![2], height: p.cam![3], overflow: 'hidden'} as const;
+				const volume = (v: number) => interpolate(v, [0, XFADE, c.dur, c.dur + XFADE], [0, 1, 1, 0], clamp);
+				return (
+					<Sequence key={`w${i}`} from={c.from} durationInFrames={c.dur + XFADE} layout="none">
+						{p.tracks ? p.tracks.map((t) => {
+							// the slot shows the webcam of whoever's view is on screen: the partner's inside "pov" spans
+							const shown = t.role === (povAt(p.guest, c.src + f - c.from) ? 'guestcam' : 'cam') && f < c.from + c.dur;
+							return <TrackView key={t.role} t={t} trimBefore={c.src} rate={1} volume={volume}
+								style={t.role === 'cam' || t.role === 'guestcam' ? {...slot, left: undefined, height: t.box[3], opacity: shown ? 1 : 0} : {opacity: 0}} />;
+						}) : (
+							<div style={{...slot, opacity: f < c.from + c.dur ? 1 : 0}}>
+								<div style={{position: 'absolute', left: -p.cam![0], top: -p.cam![1], width: 1920, height: 1080}}>{game(c, {}, true)}</div>
+							</div>
+						)}
+					</Sequence>
+				);
+			})}
+			{hold > 0 && p.cam && (() => {
+				const slot = {position: 'absolute', top: GAME.top + GAME.size + 40, right: 40, width: p.cam![2], height: p.cam![3], overflow: 'hidden'} as const;
+				const cam = p.tracks?.find((t) => t.role === (povAt(p.guest, lastSrc) ? 'guestcam' : 'cam')) ?? p.tracks?.find((t) => t.role === 'cam');
+				return (
+					<Sequence from={last.from + last.dur} durationInFrames={hold} layout="none">
+						<Freeze frame={0}>
+							{cam ? <TrackView t={cam} trimBefore={lastSrc} rate={1} volume={() => 0} muted style={{...slot, left: undefined, height: cam.box[3]}} /> : (
+								<div style={slot}>
+									<div style={{position: 'absolute', left: -p.cam![0], top: -p.cam![1], width: 1920, height: 1080}}>
+										<OffthreadVideo src={src} trimBefore={lastSrc} muted style={{width: 1920, height: 1080}} />
+									</div>
+								</div>
+							)}
+						</Freeze>
+					</Sequence>
+				);
+			})()}
+			{hold > 0 && <Sequence from={last.from + last.dur}><Audio src={staticFile('sfx/hit.wav')} volume={0.5} /></Sequence>}
+			<Stack still style={{left: 70, top: GAME.top + GAME.size + 90}} lines={[{text: partner?.text ?? p.text.channel, color: WHITE, size: 96}, {text: partner ? (partner.sub ?? '') : p.text.from_stream, color: CYAN, size: 42}]} />
 			{p.effects.map((e, i) => (
 				<Sequence key={`e${i}`} from={e.at} durationInFrames={212}>
 					<AbsoluteFill style={{top: GAME.top + 40, alignItems: 'center'}}>

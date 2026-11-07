@@ -7,13 +7,14 @@ const edit = ((getInputProps() as {edit?: typeof fallback}).edit ?? fallback);
 import thumbFallback from './thumb.json';
 import styles from './styles.json';
 import {CYAN, lineStyle, TILT, WHITE} from './look';
+import {Guest, sourceAt} from './Pov';
 
 // Layout and readability come from scripts/thumb_plan.py: hook lines and size, darkening behind the text, headline colour,
 // a plate behind the tag when needed, and the webcam cut-out. Text top left, face right of centre: the bottom-right corner
 // stays clear for YouTube's duration badge.
 type Plan = {lines?: string[]; size?: number; scrim?: number; color?: string; plate?: boolean};
 const thumb = ((getInputProps() as {thumb?: typeof thumbFallback & Plan}).thumb ?? thumbFallback) as typeof thumbFallback & Plan;
-const src = staticFile(edit.source);
+const src = sourceAt((edit as {guest?: Guest}).guest, staticFile(edit.source), thumb.bg);
 const HEAD = styles[edit.style as keyof typeof styles].headline;
 const face = (edit as {faceCut?: string}).faceCut;
 const size = (thumb.size ?? 12) * 12.8; // % of the 1280 px width → px

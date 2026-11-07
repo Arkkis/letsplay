@@ -10,6 +10,7 @@ const edit = ((getInputProps() as {edit?: typeof fallback}).edit ?? fallback);
 import styles from './styles.json';
 import {KineticWords} from './Kinetic';
 import {CYAN, lineStyle, Stack, TILT, WHITE} from './look';
+import {Guest, GuestView, povGain, povOverlaps, sourceAt, Track, TrackView} from './Pov';
 
 // Per-game look and music (hype / horror / chill), chosen in the EDL.
 const STYLE = styles[edit.style as keyof typeof styles];
@@ -20,6 +21,10 @@ const TEXT = (edit as {text?: Record<string, string>}).text ?? {effect_label: ''
 const cam = edit.cam as number[] | null; // null when the stream has no webcam (then there are no face zooms)
 const FACE = cam ? {x: cam[0] + cam[2] / 2, y: cam[1] + cam[3] / 2} : {x: W / 2, y: H / 2};
 const src = staticFile(edit.source);
+const guest = (edit as {guest?: Guest}).guest; // co-op: the partner's view, switched to in the EDL's "pov" spans
+const tracks = (edit as {tracks?: Track[] | null}).tracks ?? []; // separate recordings: webcams drawn over the game
+// Notes to the viewer (e.g. the co-op partner's mic is missing here): an effect-style banner with the note label.
+const notes = (edit as {notes?: {at: number; name: string; fi: string; dur: number}[]}).notes ?? [];
 const sfx = (name: string) => staticFile(`sfx/${name}.wav`);
 const music = (name: string) => staticFile(`music/${name}.mp3`);
 const FILL: React.CSSProperties = {width: '100%', height: '100%'};
@@ -52,16 +57,21 @@ const ClipView: React.FC<{clip: Clip}> = ({clip}) => {
 	const fade = clip.fade ? interpolate(f, [lead + clip.dur - clip.fade, lead + clip.dur], [1, 0], clamp) : 1;
 	// The recap is graded apart from the episode: desaturated and a touch darker, under letterbox bars.
 	const look = clip.section === 'recap' ? 'saturate(0.45) contrast(1.08) brightness(0.85)' : '';
+	const volume = (vf: number) => interpolate(vf, [0, lead + XFADE, lead + clip.dur, lead + clip.dur + XFADE], [0, 1, 1, 0], clamp) * (rate(clip) > 1 ? 0.3 : 1)
+		* (clip.fade ? interpolate(vf, [lead + clip.dur - clip.fade, lead + clip.dur], [1, 0], clamp) : 1);
+	const from = clip.src - lead;
+	const pov = !clip.file && povOverlaps(guest, from, from + (lead + clip.dur + XFADE) * rate(clip));
 	return (
 		<AbsoluteFill style={{transform: `scale(${(1 + 0.14 * t) * (clip.jump ? 1.05 : 1)})`, filter: (t > 0.01 ? `blur(${14 * t}px) ` : '') + look || undefined,
 			opacity: f < lead ? 0 : fade}}>
 			<OffthreadVideo style={FILL}
 				src={clip.file ? staticFile(clip.file) : src}
-				trimBefore={clip.src - lead}
+				trimBefore={from}
 				playbackRate={rate(clip)}
-				volume={(vf) => interpolate(vf, [0, lead + XFADE, lead + clip.dur, lead + clip.dur + XFADE], [0, 1, 1, 0], clamp) * (rate(clip) > 1 ? 0.3 : 1)
-					* (clip.fade ? interpolate(vf, [lead + clip.dur - clip.fade, lead + clip.dur], [1, 0], clamp) : 1)}
+				volume={(vf) => volume(vf) * (pov ? 1 - povGain(guest, from + vf * rate(clip)) : 1)}
 			/>
+			{pov && <GuestView g={guest} f={f} trimBefore={from} rate={rate(clip)} style={FILL} volume={volume} />}
+			{!clip.file && tracks.map((tr) => <TrackView key={tr.role} t={tr} trimBefore={from} rate={rate(clip)} volume={volume} />)}
 		</AbsoluteFill>
 	);
 };
@@ -141,10 +151,10 @@ const Caption: React.FC<{text: string; words?: number[]; dur: number; i: number;
 };
 
 // Banner for a game event (Chaos Mod effect, or a hand-placed one such as a randomizer outcome): label, name, description.
-const EffectBadge: React.FC<{name: string; fi: string}> = ({name, fi}) => (
+const EffectBadge: React.FC<{name: string; fi: string; dur: number; label?: string}> = ({name, fi, dur, label = TEXT.effect_label}) => (
 	<AbsoluteFill style={{alignItems: 'center', paddingTop: 70}}>
-		<Stack dur={210} style={{position: 'relative'}} lines={[
-			...(TEXT.effect_label ? [{text: TEXT.effect_label, color: CYAN, size: 34}] : []),
+		<Stack dur={dur - 2} style={{position: 'relative'}} lines={[
+			...(label ? [{text: label, color: CYAN, size: 34}] : []),
 			{text: name, color: HEAD, size: 88}, ...(fi ? [{text: fi, color: WHITE, size: 38, light: true}] : []),
 		]} />
 	</AbsoluteFill>
@@ -163,7 +173,7 @@ const Title: React.FC = () => {
 	return (
 		<AbsoluteFill style={{opacity: fadeOut, background: 'black'}}>
 			<AbsoluteFill style={{filter: 'blur(16px) brightness(0.55) saturate(1.3)', transform: `scale(${1.1 + f * 0.0006})`}}>
-				<Freeze frame={0}><OffthreadVideo style={FILL} src={src} trimBefore={t.bg} muted /></Freeze>
+				<Freeze frame={0}><OffthreadVideo style={FILL} src={sourceAt(guest, src, t.bg)} trimBefore={t.bg} muted /></Freeze>
 			</AbsoluteFill>
 			{face && <Img src={staticFile(face)} style={{position: 'absolute', right: 30, bottom: 0, height: 700,
 				filter: 'brightness(1.1) contrast(1.08) drop-shadow(0 0 24px rgba(0,0,0,0.7))',
@@ -177,21 +187,42 @@ const Title: React.FC = () => {
 };
 
 // Name tag above a webcam. `side: "right"` puts it over a bottom-right webcam; a co-op `guest` gets one on the other side.
+// With separate webcam tracks each tag is aligned to its own cam (`box`), above the highest cam so a long sub line never
+// covers the other one, and the two take turns so they never overlap.
 type Tag = {text: string; sub: string};
-const NameTag: React.FC<{tag: Tag; right: boolean; delay: number; dur: number}> = ({tag, right, delay, dur}) => (
-	<Sequence from={delay} durationInFrames={dur - delay} layout="none">
-		<Stack dur={dur - delay} align={right ? 'right' : 'left'} style={{bottom: 330, [right ? 'right' : 'left']: 80}}
-			lines={[{text: tag.text, color: HEAD, size: 110}, {text: tag.sub, color: CYAN, size: 40}]} />
-	</Sequence>
-);
+const NameTag: React.FC<{tag: Tag; right: boolean; delay: number; dur: number; box?: number[]}> = ({tag, right, delay, dur, box}) => {
+	const pos: React.CSSProperties = box
+		? (box[0] + box[2] / 2 > 960 ? {right: 1920 - box[0] - box[2]} : {left: box[0]})
+		: {[right ? 'right' : 'left']: 80};
+	const align = box ? (box[0] + box[2] / 2 > 960 ? 'right' : 'left') : right ? 'right' : 'left';
+	return (
+		<Sequence from={delay} durationInFrames={dur - delay} layout="none">
+			<Stack dur={dur - delay} align={align} style={{bottom: box ? 1080 - Math.min(box[1], ...tracks.map((t) => t.box[1])) + 12 : 330, ...pos}}
+				lines={[{text: tag.text, color: HEAD, size: 110}, {text: tag.sub, color: CYAN, size: 40}]} />
+		</Sequence>
+	);
+};
 
 const LowerThird: React.FC = () => {
 	const l = edit.lowerThird as Tag & {dur: number; side?: string; guest?: Tag};
 	const right = l.side === 'right';
+	const box = (role: string) => tracks.find((t) => t.role === role)?.box;
+	const host = box('cam'), guestBox = box('guestcam');
+	if (l.guest && host && guestBox) {
+		const half = Math.round(l.dur / 2);
+		return (
+			<>
+				<NameTag tag={l} right={right} delay={0} dur={half} box={host} />
+				<Sequence from={half} durationInFrames={l.dur - half} layout="none">
+					<NameTag tag={l.guest} right={!right} delay={0} dur={l.dur - half} box={guestBox} />
+				</Sequence>
+			</>
+		);
+	}
 	return (
 		<>
-			<NameTag tag={l} right={right} delay={0} dur={l.dur} />
-			{l.guest && <NameTag tag={l.guest} right={!right} delay={12} dur={l.dur} />}
+			<NameTag tag={l} right={right} delay={0} dur={l.dur} box={host} />
+			{l.guest && <NameTag tag={l.guest} right={!right} delay={12} dur={l.dur} box={guestBox} />}
 		</>
 	);
 };
@@ -204,7 +235,7 @@ const EndFreeze: React.FC = () => {
 	return (
 		<AbsoluteFill>
 			<AbsoluteFill style={{transform: `scale(${1 + f * 0.0006})`, filter: `saturate(${interpolate(f, [0, 20], [1, 0.25], clamp)}) contrast(1.1)`}}>
-				<Freeze frame={0}><OffthreadVideo style={FILL} src={src} trimBefore={z.src} muted /></Freeze>
+				<Freeze frame={0}><OffthreadVideo style={FILL} src={sourceAt(guest, src, z.src)} trimBefore={z.src} muted /></Freeze>
 			</AbsoluteFill>
 			<div style={{position: 'absolute', left: 90, top: 470, opacity: slam, transform: `scale(${1.8 - 0.8 * slam})`, transformOrigin: 'left top'}}>
 				<Stack still style={{position: 'relative'}} lines={[{text: z.text, color: HEAD, size: 210}]} />
@@ -225,7 +256,7 @@ const EndScreen: React.FC = () => {
 	return (
 		<AbsoluteFill style={{background: 'black', opacity: interpolate(f, [0, 12, e.dur - 20, e.dur], [0, 1, 1, 0], clamp)}}>
 			<AbsoluteFill style={{filter: 'blur(22px) brightness(0.4)', transform: 'scale(1.15)'}}>
-				<Freeze frame={0}><OffthreadVideo style={FILL} src={src} trimBefore={edit.freeze.src} muted /></Freeze>
+				<Freeze frame={0}><OffthreadVideo style={FILL} src={sourceAt(guest, src, edit.freeze.src)} trimBefore={edit.freeze.src} muted /></Freeze>
 			</AbsoluteFill>
 			<div style={{position: 'absolute', top: 50, left: 0, right: 0, display: 'flex', justifyContent: 'center'}}>
 				<Stack align="center" style={{position: 'relative'}} lines={[{text: e.title, color: HEAD, size: 130}]} />
@@ -264,8 +295,11 @@ export const LetsPlay: React.FC = () => {
 			{(extra.cards ?? []).map((c, i) => (
 				<Sequence key={`card${i}`} from={c.at} durationInFrames={c.dur}><ChapterCard card={c} /></Sequence>
 			))}
+			{notes.map((e, i) => (
+				<Sequence key={`note${i}`} from={e.at} durationInFrames={e.dur}><EffectBadge name={e.name} fi={e.fi} dur={e.dur} label={(TEXT as {note_label?: string}).note_label} /></Sequence>
+			))}
 			{edit.effects.map((e, i) => (
-				<Sequence key={`fx${i}`} from={e.at} durationInFrames={212}><EffectBadge name={e.name} fi={e.fi} /></Sequence>
+				<Sequence key={`fx${i}`} from={e.at} durationInFrames={e.dur ?? 212}><EffectBadge name={e.name} fi={e.fi} dur={e.dur ?? 212} /></Sequence>
 			))}
 			{edit.captions.map((c, i) => (
 				<Sequence key={`cap${i}`} from={c.at} durationInFrames={c.dur ?? 132}><Caption text={c.text} words={c.words} dur={c.dur ?? 132} i={i} slot={c.slot ?? 0} /></Sequence>

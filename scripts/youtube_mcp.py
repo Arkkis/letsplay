@@ -52,9 +52,11 @@ def retention(video_id):
     from googleapiclient.errors import HttpError
     an = build("youtubeAnalytics", "v2", credentials=credentials(), cache_discovery=False)
     try:
-        r = an.reports().query(ids="channel==MINE", startDate="2000-01-01", endDate="2100-01-01", dimensions="elapsedVideoTimeRatio",
+        r = an.reports().query(ids="channel==MINE", startDate="2000-01-01", endDate=time.strftime("%Y-%m-%d"), dimensions="elapsedVideoTimeRatio",
                                metrics="audienceWatchRatio,relativeRetentionPerformance", filters=f"video=={video_id}").execute()
     except HttpError as e:
+        if e.resp.status == 403 and b"accessNotConfigured" in e.content:
+            raise RuntimeError("YouTube Analytics API is not enabled in the Google Cloud project: enable youtubeanalytics.googleapis.com") from e
         if e.resp.status == 403:
             raise RuntimeError(f"analytics not allowed by the saved sign-in: run `{sys.executable} {__file__} auth` again") from e
         raise
@@ -147,8 +149,9 @@ def apply_episode(video_id: str, output: str, tags: list[str] | None = None) -> 
     Visibility is untouched. Languages come from config.json."""
     lang, tr = CFG["language"], CFG.get("translation")
     y = yt()
+    edl = episode_edl(output) or {}
     description = open(out_file(output, ".description.txt")).read().strip()
-    snippet = update_snippet(y, video_id, title=output[:100], description=description, categoryId=GAMING, tags=tags,
+    snippet = update_snippet(y, video_id, title=(edl.get("youtubeTitle") or output)[:100], description=description, categoryId=GAMING, tags=tags,
                              defaultLanguage=lang, defaultAudioLanguage=lang)
     done = ["title", "description", "tags", "category", "language"]
     y.thumbnails().set(videoId=video_id, media_body=MediaFileUpload(out_file(output, ".jpg"), mimetype="image/jpeg")).execute()
@@ -156,7 +159,6 @@ def apply_episode(video_id: str, output: str, tags: list[str] | None = None) -> 
     update_status(y, video_id, selfDeclaredMadeForKids=False, containsSyntheticMedia=False, license="youtube",
                   embeddable=True, publicStatsViewable=True)
     done.append("not for kids / no altered content")
-    edl = episode_edl(output)
     date = edl and re.search(r"(\d{4}-\d{2}-\d{2})$", edl["vod"])
     if date:
         y.videos().update(part="recordingDetails", body={"id": video_id, "recordingDetails": {"recordingDate": f"{date[1]}T00:00:00Z"}}).execute()
@@ -165,7 +167,8 @@ def apply_episode(video_id: str, output: str, tags: list[str] | None = None) -> 
         if not tr:
             raise ValueError("no translation language configured")
         t = json.load(open(out_file(output, f".{tr}.json")))
-        y.videos().update(part="localizations", body={"id": video_id, "localizations": {tr: {"title": t["title"][:100], "description": t["description"]}}}).execute()
+        t_title = (edl.get(tr) or {}).get("youtubeTitle") or t["title"]
+        y.videos().update(part="localizations", body={"id": video_id, "localizations": {tr: {"title": t_title[:100], "description": t["description"]}}}).execute()
         done.append(f"{tr} title/description")
     except ValueError:
         pass  # episode has no English translation

@@ -10,7 +10,7 @@ BEAT_PAD = 1.2        # pause kept after an exclamation or question (the beat af
 EVENT_PAD = 0.6       # kept after a laugh / scream / bang
 MIN_CLIP, FILL_GAP = 4.0, 6.0  # clips shorter than MIN_CLIP absorb a neighbouring gap up to FILL_GAP to avoid flash cuts
 MOTION_FPS, MOTION_PCT = 5, 98  # visual action: game motion above this percentile of the range
-GHOST_LONG, GHOST_DB = 1.2, 12  # a word over GHOST_LONG s whose second half is GHOST_DB quieter than speech was never said
+GHOST_LONG, GHOST_DB = 1.0, 12  # a word over GHOST_LONG s whose second half is GHOST_DB quieter than speech was never said ("Jani" 1.2 s over a laugh and silence)
 
 
 def real_words(words, rms):
@@ -23,16 +23,41 @@ def real_words(words, rms):
 
 
 def fix_words(words, fixes):
-    """Transcript words with the EDL's "wordFixes" applied ({"heard": "said"}, matched on the bare lower-case word, trailing
-    punctuation kept): proof-read spellings for the Short cues and the subtitle file without editing the transcript."""
+    """Transcript words with the EDL's "wordFixes" applied ({"heard": "said"}, matched on bare lower-case words, trailing
+    punctuation kept): proof-read spellings for the Short cues and the subtitle file without editing the transcript.
+    A key of several words matches them in a row (for a word that is right elsewhere: {"heti sano": "Dexta sano"}); the
+    fixed words take the run's timing (word for word when the counts match, else spread evenly). A word Whisper splits off at a hyphen ("Co" "-op") is joined back first."""
+    joined = []
+    for w in words:
+        if joined and re.match(r"^\s*-\w", w["word"]):
+            joined[-1] = {**joined[-1], "word": joined[-1]["word"].rstrip() + w["word"].strip(), "end": w["end"]}
+        else:
+            joined.append(w)
+    words = joined
     if not fixes:
         return words
-    table = {k.lower(): v for k, v in fixes.items()}
-    out = []
-    for w in words:
-        m = re.match(r"^(\s*)(.*?)([.,!?…]*)$", w["word"])
-        fixed = table.get(m.group(2).lower())
-        out.append({**w, "word": f"{m.group(1)}{fixed}{m.group(3)}"} if fixed else w)
+    bare = lambda x: re.sub(r"^\W+|\W+$", "", x).lower()
+    table = sorted(((k.lower().split(), v) for k, v in fixes.items()), key=lambda kv: -len(kv[0]))
+    out, i = [], 0
+    while i < len(words):
+        for key, fixed in table:
+            run = words[i:i + len(key)]
+            if [bare(w["word"]) for w in run] == key:
+                lead = re.match(r"^\W*", run[0]["word"]).group(0)
+                tail = re.search(r"\W*$", run[-1]["word"]).group(0)
+                core = run[0]["word"][len(lead):]
+                if core[:1].isupper():  # keep a sentence-start capital
+                    fixed = fixed[:1].upper() + fixed[1:]
+                parts = fixed.split()  # one word entry per shown word, so captions have a timing for each
+                a, b = run[0]["start"], run[-1]["end"]
+                for j, part in enumerate(parts):
+                    t = run[j] if len(run) == len(parts) else {**run[0], "start": a + (b - a) * j / len(parts), "end": a + (b - a) * (j + 1) / len(parts)}
+                    out.append({**t, "word": (lead if j == 0 else " ") + part + (tail if j == len(parts) - 1 else ""), **({"glued": True} if j else {})})
+                i += len(key)
+                break
+        else:
+            out.append(words[i])
+            i += 1
     return out
 
 

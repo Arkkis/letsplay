@@ -9,4 +9,5 @@
 | [GTA V Chaos Mod (ChaosModV)](https://github.com/gta-chaos-mod/ChaosModV) | effect names (`games/chaosmod/names.json`) | GPL-3.0 | Not shipped: `games/chaosmod/build_names.py` generates the list from the mod's source on your machine. |
 | Kevin MacLeod, [incompetech.com](https://incompetech.com) | style music | CC BY 4.0 | Not shipped: `scripts/fetch_music.sh` downloads it; every description credits the tracks used. |
 | [Kenney](https://kenney.nl) Impact Sounds, Interface Sounds | sound effects in `public/sfx` (some layered or edited) | CC0 1.0 | |
+| [Robust Video Matting](https://github.com/PeterL1n/RobustVideoMatting) (MobileNetV3 fp16 ONNX) | transparent webcam backgrounds (`assemble --cutout`) | GPL-3.0 | Not shipped: `scripts/matte.py` downloads the model to `models/` on first use and runs it with onnxruntime-gpu (MIT) in its own uv environment. |
 | ffmpeg | all media processing | LGPL/GPL (your system's build) | Not shipped. |

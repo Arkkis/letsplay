@@ -16,7 +16,9 @@ Make the editorial decisions yourself and deliver finished episodes; the user wa
 ## Learnings loop
 
 `RULEBOOK.md` in the repo root is every editorial rule, numbered (cutting, structure, captions, chapters, zooms, Shorts,
-thumbnail, verification); `LEARNINGS.md` is this skill's memory. **First action of every run: read both whole.** **Last
+thumbnail, verification); `LEARNINGS.md` is this skill's memory; `ROADMAP.md` lists researched but unbuilt pipeline
+improvements (read it only when asked to improve the pipeline, never during an episode). **First action of every run: read
+the first two whole.** **Last
 action of every run, and every time the user corrects a result: append what you learned to `LEARNINGS.md`** (dated, one
 line each: what went wrong or what the user asked for, and the rule that follows; measurements too). A learning that has
 held for a few episodes becomes a numbered rule in `RULEBOOK.md` and leaves the file; keep it under ~150 lines. Never end
@@ -24,7 +26,7 @@ a run without updating it.
 
 ## Hard rules
 
-`RULEBOOK.md` §1–2: the user owns uploads and every publish go; never upscale, never blur the overlay, captions verbatim
+`RULEBOOK.md` §1–2: the user owns uploads and every publish go; original recordings are read-only (2.6); never upscale, never blur the overlay, captions verbatim
 and uncensored, no render installed without the clock check. Compositions are laid out in 1920x1080 units and `lp.py`
 renders at `--scale=<VOD width>/1920`. Run long steps (`ingest`, `prep`, `render`) with `run_in_background` and wait
 for the notification.
@@ -46,6 +48,30 @@ by you and every edit is reviewed by you before it renders. Never ship a draft a
    transcript line; `context` then marks the partner's lines `[GUEST]`, unclear ones `[?]`, and the streamer's lines
    addressed to the partner `[TO GUEST]` (config `partner_words`; talk about the partner's game) (~7 min for a 5 h VOD).
    The labels are a hint, not the truth: they miss and mislabel lines, so anything put on a line is checked against the frame.
+   **Separate recordings** (gameplay and webcam as their own files, yours and a co-op partner's; game audio only in the
+   gameplay files, each mic only in its webcam file): kept as separate tracks, composited only at render. The files share
+   no audio to sync by, so the user aligns them on a Kdenlive timeline (all four tracks; for drift over hours, cut a clip
+   later on and re-align the piece) and saves the project. `lp.py assemble <slug> --game <yours> --cam <your webcam>
+   --guest-cam <theirs> [--guest-game <theirs>] --kdenlive <project>` (or `--offset cam=m:ss` per file) records the sync,
+   webcam boxes (`--cam-box`/`--guest-cam-box x,y,w`, negative = from the right/bottom; defaults stacked bottom-right;
+   `--cutout`: transparent backgrounds, side by side on the bottom edge) and measured levels (`--gain role=±dB`) in
+   `work/<slug>/assemble.json`, and bakes only a reference for analysis: `footage/<slug>.mp4` (your gameplay, plain
+   webcam boxes, the mix) and with `--guest-game` `footage/<slug>-guest.mp4` (the partner's view on the same clock;
+   `lp.py frames <slug> <times> --guest` shows it). `prep` then cuts every track for the episode on its own:
+   `public/<slug>-epN.mp4` (your game, graded), `-guest.mp4` (theirs, which the EDL's `"pov"` switches to, RULEBOOK 7.8),
+   `-cam`/`-guestcam` (the webcam with its mic at its box size; with `--cutout` matted on the GPU for the episode's range
+   only, a few minutes per episode, VP9 with alpha). The render draws the webcams over the game at their boxes, so boxes,
+   views and cut-outs change with a re-prep, not a re-assembly. `--guest-game-box x,y,w` instead bakes their gameplay as a
+   box into yours (no guest track). Run `--preview m:ss` at a few points first and look at the 20 s clips: boxes off the
+   HUD, lips in sync. The full reference takes an hour or two for a long session (background) and is followed by
+   `lp.py ingest footage/<slug>.mp4 --slug <slug>` and `lp.py speakers <slug>` with no boxes: labels come from which mic
+   is louder, far more reliable than mouth reading. For sync that holds over hours, ask both players for a marker at the
+   start and at the end: side by side in-game, one counts "3, 2, 1, now" and honks on "now", the other says "now"
+   on hearing it. That puts one event in all four files (both mics, both games); aligning both markers in Kdenlive
+   fits the drift.
+   The webcam rect for motion, faces and the EDL's `cam` comes from the assembly, not config `cam`.
+   **Whose stream was it?** Ask before writing the lower third, the descriptions or the Shorts label. When the user
+   recorded locally and only the partner streamed, nothing says "Twitch stream": set `"fromStream"` (RULEBOOK 14.5).
 2. **split** `lp.py split <slug> [--target 25] [--parts N]`: episodes of ~25 *edited* minutes each (the 20–30 min sweet spot
    for gaming; ≥8 min allows mid-roll ads). It estimates how much each stretch keeps after trimming, so talky streams get
    longer raw parts than quiet ones, and cuts at a speech pause. `--parts N` fixes the count (speedruns: see below).
@@ -63,24 +89,40 @@ by you and every edit is reviewed by you before it renders. Never ship a draft a
       transcript: check with `frames` what really happens), `[LOUD]`, `[LAUGH]` `[SCREAM]` `[BANG]` (heard, not in the
       transcript: a laugh marks a joke that landed), `[ACTION]` (heavy on-screen motion: something is happening even if
       nobody talks), `[FACE]` (the webcam's liveliest 2 s windows: reactions, the first place to look for face zooms).
-   3. Curate the draft like a professional editor (`RULEBOOK.md`): drop weak or repetitive ranges, tighten boundaries to
+   3. Curate the draft like a professional editor (`RULEBOOK.md`). Rank the candidate stretches first (6.6: the draft's
+      picks, audio peaks, a `frames` sheet), keep only ranges where something happens on screen or the talk pays off
+      (4.7), cut repeats (4.8), keep one through-line (5.9), an intro of about 20 s over action (5.2), a 1.5 s title card (5.1b) and an ending on a payoff (5.8).
+      Drop weak or repetitive ranges, tighten boundaries to
       sentence ends, pick the real cold open and intro, write verbatim captions, place face/game zooms, write one-line descriptions
       for effects without one (they're saved to `games/chaosmod/descriptions.<language>.json` for later episodes), chapter labels, title,
       description and the translation. A chapter label sums up the whole span from its time to the next chapter (what the
       viewer sees across it: places, vehicles, retries, results), never just the frame at the chapter time (`RULEBOOK.md` 11.2).
       One chapter per story beat of 2–3 min (4–6 in a 10 min episode), never two inside a minute (11.1).
-   4. Shorts: pick 2–4 of the episode's best self-contained moments for `"shorts"` (see Shorts below).
-   5. **Frame check (co-op: mandatory, otherwise whenever a label names a thing).** `lp.py frames <slug> <m:ss> ...`
-      at the time of every chapter, caption, cold-open hit and Short (a few frames across each range) and look at the
-      sheet: the named thing (plane, fire, bank, sniper, motorbike…) must be in the game frame. If it isn't, the line
-      was about the partner's game or about nothing: drop it and name the chapter after what the frames across its whole
-      span show (the mission screen, the vehicle, the place, the on-screen text). Talk alone never names anything.
+   4. Shorts: rank the candidates on a frame sheet (RULEBOOK 15.0: every cold-open hit and big caption on something seen
+      is one; a hit left out gets its reason in `"notShorts"`), then pick up to 4, picture first and no inside jokes
+      (15.4); fewer is fine (see Shorts below).
+   5. **Frame check (always).** `lp.py see edits/<slug>-epN.json` (~1 min; a local vision model, config `vision_model`,
+      default `gemma4:12b` in Ollama) → read `work/<slug>/epN.see.txt`: for every chapter span, caption, cold-open hit, Short
+      and the thumbnail, a `scene` line saying what the game frames show, and for every label a verdict: `ok`, `!! NOT
+      VISIBLE` (the named thing isn't in the frames: drop it or relabel), `?? unclear` (an abstract label, or can't tell) or,
+      for a caption, `-- talk, nothing to see` (the quote names nothing that should be on screen: fine as it is).
+      The model's reading of the label is quoted on the verdict line; a mistranslation voids that verdict, the scene line
+      still stands. Open the row sheet named on a flagged line (`work/<slug>/see/epN-<item>.jpg`) only when the scene line
+      doesn't settle it, and `lp.py frames <slug> <m:ss> ...` for anything the model didn't look at. A named thing (plane,
+      fire, bank, sniper, motorbike…) must be in the game frame; if it isn't, the line was about the partner's game or about
+      nothing: drop it and name the chapter after what the scene lines across its span show (the mission screen, the
+      vehicle, the place, the on-screen text). Talk alone never names anything. Co-op: every label, no exceptions.
    6. Thumbnail: `lp.py faces <slug> N` (liveliest webcam moments) and `lp.py frames <slug> <m:ss> ...` (game frames)
       → pick `thumb.face`, `thumb.bg` and 2–4 words of text.
    7. **Proof-read** `lp.py proof edits/<slug>-epN.json` → read `work/<slug>/epN.proof.txt`: every caption's line and every
       Short decoded a second time beside the transcript and the caption text. Fix every `!!` (caption words heard in
       neither decode: rewrite the caption to what is said) and every `??` (transcript words the second pass doesn't hear:
-      they become the Short's cues and the subtitles, so map them in `"wordFixes"`). Then `lp.py check edits/<slug>-epN.json`
+      they become the Short's cues and the subtitles, so map them in `"wordFixes"`). Then read `work/<slug>/epN.text.txt`
+      whole, every time: every caption, card, note, Short cue, subtitle cue and both languages' title and description.
+      `proof.txt` ends with SUBTITLE SUSPECTS: cues with a word Whisper was unsure of or the Finnish speller
+      (libvoikko) rejects and the stream rarely says, each with a second decode beside it. Settle those first.
+      Fix mishearings, misspellings and stiff translation (RULEBOOK 8.7), re-run `proof`, and when it reads right
+      `lp.py proof edits/<slug>-epN.json --read` (render refuses unstamped or changed text). Then `lp.py check edits/<slug>-epN.json`
       → fix everything it reports (all problems are listed at once), then read the grid `work/<slug>/epN-check.jpg`.
    8. **Review** `lp.py script edits/<slug>-epN.json` → read `work/<slug>/epN.script.txt` top to bottom as the viewer
       will meet it: does every cut land on a finished sentence, does each joke get its setup, are there thank-yous or chat
@@ -88,15 +130,20 @@ by you and every edit is reviewed by you before it renders. Never ship a draft a
       and does its label cover everything up to the next card, is anything repeated or confusing? Fix and re-run until it reads like a finished episode.
    9. `lp.py render edits/<slug>-epN.json` → `out/<playlist>/<output>.mp4` (≈ 17–27 min), `<output>.jpg` (thumbnail),
       `<output>.description.txt`, `.<language>.srt`, `.<translation>.json`, and the Shorts in `out/<playlist>/shorts/` (~25 s each to render). Check the printed loudness is about −14 LUFS and look at
-      the thumbnail. Later fixes: `--patch` (see below), never a full re-render.
+      the thumbnail. Later fixes: `--patch` (see below), never a full re-render. Look at rendered output with
+      `lp.py look edits/<slug>-epN.json <m:ss> ... [--short K] [--last S]` (one sheet, `work/<slug>/epN-look.png`),
+      never hand-written ffmpeg grabs; a patch render writes that sheet of what it changed by itself.
+      `lp.py at edits/<slug>-epN.json <m:ss> ... [--vod]` maps episode time ↔ VOD time with the line said there.
 4. Report: per episode the file, length, and anything the user must know in a clause. Never upload video files.
 5. **YouTube**: the user uploads the mp4 in Studio. `lp.py publish edits/<slug>-epN.json` (run in the background) waits for
    the upload (matched by length), applies title, description with chapters and credits, tags, thumbnail, subtitles,
    translated title/description, Gaming, the channel's language, recording date, not for kids, no altered content, and the
    `playlist` from the EDL; the video id is kept in `work/<slug>/epN.youtube.json`. Add `--at <ISO>` (schedule) or
    `--now` **only after the user's explicit go for that video**. The MCP server `youtube` (`scripts/youtube_mcp.py`) has
-   the same operations as tools. End screens and the game title are not in the API: tell the user to set them in Studio
-   (the last 15 s are laid out for a row of video slot, subscribe circle, video slot).
+   the same operations as tools. Not in the API, so the user sets them in Studio: the end screen and the game title on the
+   episode (the last 15 s are laid out for a row of video slot, subscribe circle, video slot), the "related video" link to
+   the full episode on every Short, and optionally a Test & Compare run (up to 3 thumbnails, a title) when there is a
+   second thumbnail worth testing. List these in the report.
    If it says "not signed in", ask the user to run `! .venv/bin/python scripts/youtube_mcp.py auth`.
 6. **Learn from the audience**: a few days after an episode went public, `lp.py retention edits/<slug>-epN.json` pulls its
    YouTube audience-retention curve and writes `work/<slug>/epN.retention.txt`: the curve in 10 % steps and the sharpest
@@ -177,7 +224,8 @@ All times are VOD times as `m:ss[.s]` (minutes may exceed 59, e.g. `62:18`). See
 
 ```jsonc
 {
- "vod": "<slug>", "episode": 1, "output": "Example Game - Part 1",
+ "vod": "<slug>", "episode": 1, "output": "Example Game - Part 1",   // file name; the YouTube title is youtubeTitle (RULEBOOK 14.1)
+ "youtubeTitle": "It all goes wrong – Example Game part 1",  // hook + series, < 60 chars, hook ≠ thumbnail text
  "style": "hype",                      // hype | horror | chill (src/styles.json: colours, caption font, music)
  "playlist": "Example Game", "tags": ["Example Game", "..."],  // used by `lp.py publish`
  "mode": "speedrun",                   // optional; omit for normal let's plays
@@ -185,26 +233,30 @@ All times are VOD times as `m:ss[.s]` (minutes may exceed 59, e.g. `62:18`). See
  "cam": [990, 480, 290, 240],          // webcam rect x,y,w,h in VOD pixels, or null; check with `frames`, layouts changed over the years
  "thumb": {"bg": "48:10.0", "face": "51:02.5", "bgZoom": 1.25, "bgOrigin": "62% 45%", "tag": "EXAMPLE GAME #1", "text": "IT ALL GOES WRONG"},
  "title": {"kicker": "EXAMPLE", "title": "GAME", "episode": "PART 1", "tagline": "...", "bg": "48:10"},
- "lowerThird": {"at": "24:40.0", "text": "YourName", "sub": "Example Game · Twitch stream 31.1.2024"},
+ "lowerThird": {"at": "24:40.0", "text": "YourName", "sub": "Example Game · Twitch stream 31.1.2024"},   // co-op: "guest": {"text", "sub"}; with separate webcam tracks each tag sits above its own cam, one after the other
                                        // optional: "side": "right" (tag over a bottom-right webcam), "guest": {"text", "sub"} = co-op partner's tag on the other side
+ "fromStream": "Co-op-sessiosta",           // optional: the Shorts' label under the channel name, when this wasn't your own stream (config text "from_stream" otherwise)
  "recap": "auto",                      // episode 2+: "previously" before the cold open: "auto" = the previous episode's coldOpen, or ranges [[a, b], ...] from anywhere in the VOD
  "coldOpen": [["21:05.0", "21:19.5", "full"], ...],   // a montage of 2–4 hits; "full" = keep as is, otherwise silences are jump-cut
  "intro":    [["24:30.0", "25:35.0"]],           // music bed under it; the title card sits between coldOpen and intro
  "main":     [["3:40.0", "4:05.5"], ...],         // chronological
+ "pov":      [["41:12.0", "41:30.5"]],            // optional, separate co-op recordings: VOD spans shown from the partner's view (RULEBOOK 7.8); Shorts then show the partner's webcam and lower-third tag too
  "bed": true,                          // optional: music bed under main, ducked under speech (default: the style's track; false = none; "<track>" = public/music/<track>.mp3)
  "chapterCards": true,                 // optional: on-screen card where each chapter starts (default true)
- "effects":  [["4:29", "Heavy Recoil", "Guns kick like a mule"]],   // rough time, mod effect name (as in context), one-line description ("" = from the library)
+ "effects":  [["4:29", "Heavy Recoil", "Guns kick like a mule"]],   // rough time, mod effect name (as in context), one-line description ("" = from the library); optional 4th: seconds on screen (default 3.5)
  "effectLabel": "ARVONTA",             // optional: hand-placed banners without a game module; times are exact, description required
+ "notes":    [["12:45.5", "Puhun Dextan kanssa", "Hänen mikkinsä ja pelikuvansa mukana vasta {from} alkaen", 8]],  // optional: a note to the viewer, banner with the config "note" label (HUOM); exact time, title, line, seconds (default 8); {from}/{until} = where the co-op partner's tracks start/end in the episode (RULEBOOK 7.9)
  "captions": [["5:34", "minimap", "I CAN'T SEE MY MINIMAP AT ALL"]], // rough time, a word in the transcript segment, verbatim caps text
- "wordFixes": {"Taviraalassa": "Sairaalassa"},   // optional, from `proof`: transcript spellings corrected in Short cues and subtitles (bare word, case-insensitive)
+ "wordFixes": {"Taviraalassa": "Sairaalassa", "heti seikkailee": "Dexta seikkailee"},   // optional, from `proof`: transcript spellings corrected in Short cues and subtitles (bare words, case-insensitive; several words = that run only)
  "faceZooms": ["7:28"], "gameZooms": ["17:15"],
  "chapters": [["0:00", "Intro"], ["3:40", "The chaos begins"]],
  "shorts": [{"from": "47:30.0", "to": "47:52.0", "title": "WHO'S IN THE BACK SEAT?", "cropX": 420},  // VOD times; cropX optional
             {"ranges": [["12:01.0", "12:16.0"], ["12:40.0", "12:58.0"]], "title": "...", "onScreen": "..."}],  // two ranges = one internal cut; onScreen: see Shorts
+ "notShorts": {"21:05.0": "inside joke about the editing"},  // optional: why a cold-open hit isn't a Short (RULEBOOK 15.0)
  "endFreeze": {"text": "TO BE CONTINUED...", "seconds": 2.5},
  "endScreen": {"seconds": 15, "title": "PART 2 COMING", "cta": "SUBSCRIBE"},
  "description": "...",
- "en": {"title": "GTA V Chaos Mod - Part 1", "description": "...", "chapters": ["Intro", ...]},  // key = config "translation"; chapters 1:1 with "chapters"
+ "en": {"title": "GTA V Chaos Mod - Part 1", "youtubeTitle": "It all goes wrong – GTA V Chaos Mod part 1", "description": "...", "chapters": ["Intro", ...]},  // key = config "translation"; chapters 1:1 with "chapters"
  "credits": "..."                      // optional; generated from the style's music (Kevin MacLeod CC BY 4.0) + Kenney SFX
 }
 ```
@@ -217,7 +269,7 @@ The last episode of a VOD gets an end screen without "part N+1 coming" (`draft` 
 
 ## Shorts
 
-Every episode also yields 2–4 vertical Shorts, chosen while editing, rendered by `lp.py render` (or `lp.py shorts`):
+Every episode also yields up to 4 vertical Shorts (fewer when fewer pass RULEBOOK 15.0–15.4), chosen while editing, rendered by `lp.py render` (or `lp.py shorts`):
 720x1280, the game as a 720x720 native-pixel window (no upscaling), the webcam at native size, a hook title on top,
 every spoken word captioned a few words at a time (Shorts are watched muted), the episode's own captions shown big
 and its banners inside the stretch, and the config's `full_episode` call ("FULL EPISODE: PART N ▶") at the end.
@@ -245,6 +297,7 @@ lp.py render edits/<slug>-epN.json --patch end           # freeze + end screen (
 lp.py render edits/<slug>-epN.json --patch 12:30-13:10   # output-time range(s), comma-separated; can combine: auto,end
 ```
 
+- A patch also re-renders each Short whose props changed (a Short.tsx-only change needs `lp.py shorts`).
 - **auto** compares `src/edit.json` with the timeline of the last render (`work/<slug>/epN.rendered.json`): changed
   captions, badges, zooms, clips, lower third, title or end are re-rendered with their sound effects. If the episode
   length changed (clips added, removed or retimed), everything from the first change to the end is re-rendered.
@@ -266,7 +319,13 @@ lp.py render edits/<slug>-epN.json --patch 12:30-13:10   # output-time range(s),
 
 ## Gotchas
 
-- Remotion copies `public/` into TMPDIR; `lp.py` points it at `.tmp/` because `/tmp` is a small RAM disk.
+- Remotion copies `public/` into TMPDIR; `lp.py` points it at `.tmp/` because `/tmp` is a small RAM disk. A hand-run
+  `npx remotion still/render` needs `TMPDIR=$PWD/.tmp` too, or it copies the multi-GB tracks into /tmp and fails with ENOSPC.
+- Two EDLs of one episode (an alternative cut) share `work/<slug>/epN.*`: props, subtitles, text and the proof stamp.
+  Back those files up before building the second, re-run `proof` and `proof --read` for it, render, then restore.
+- The Finnish speller (`proof`) needs libvoikko and a dictionary. On Arch `voikko-fi` is AUR-only and needs `foma`,
+  which isn't packaged: install `libvoikko` from the repos and unzip the prebuilt https://www.puimula.org/htp/testing/voikko-snapshot-v5/dict.zip
+  into `~/.voikko/5/mor-standard/`.
 - The project is not a git repository: don't try worktree isolation; renders need the shared `footage/` and `public/`.
 - `pgrep -f`/`pkill -f` with a pattern also matches the shell running it (a wait loop on `pgrep -f codec=wav` never
   ends; `pkill -f ocr_` kills its own command). Use `pgrep -f "[o]cr_"` style patterns or PIDs.

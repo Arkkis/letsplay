@@ -81,13 +81,14 @@ def main(props_path, edl_path):
     if e.get("cam") and th.get("face") is not None:
         name = f"{edl['vod']}-ep{edl['episode']}-face-{th['face']}.png"
         if not os.path.exists(f"public/{name}"):
-            img = frame(source, th["face"], fps)
-            cutout(img, e["cam"], img.width, f"public/{name}")
+            own = next((t for t in e.get("tracks") or [] if t["role"] == "cam"), None)  # separate recordings: the webcam's own file
+            img = frame(os.path.join("public", own["source"]) if own else source, th["face"], fps)
+            cutout(img, [0, 0, 1920, round(1920 * img.height / img.width)] if own else e["cam"], img.width, f"public/{name}")
         e["faceCut"] = name
     bg = frame(source, th["bg"], fps)
     z = th.get("bgZoom", 1)
     ox, oy = (float(v.rstrip("%")) / 100 for v in th.get("bgOrigin", "50% 50%").split())
-    if e.get("cam"):  # zoom just enough that the stream's own webcam leaves the frame (the cut-out replaces it)
+    if e.get("cam") and not e.get("tracks"):  # zoom just enough that the stream's own webcam leaves the frame (the cut-out replaces it)
         cx, cy = e["cam"][0] / 1920, e["cam"][1] / 1080
         need = min((1 - ox) / (cx - ox) if cx > ox else 9, (1 - oy) / (cy - oy) if cy > oy else 9)
         if need > 1.6:

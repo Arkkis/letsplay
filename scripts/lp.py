@@ -1,14 +1,21 @@
 """Let's play pipeline driver. Every step is resumable: outputs that already exist are kept.
 
+  lp.py assemble <slug> --game G.mp4 [--cam C] [--guest-cam C] [--guest-game G] (--kdenlive P | --offset role=m:ss ...)
+                                                separate gameplay/webcam recordings (yours and a co-op partner's), aligned in
+                                                Kdenlive, → one VOD footage/<slug>.mp4 + per-mic loudness for speakers
   lp.py ingest <vod.mp4> [--slug S] [--game G]  copy VOD, transcribe, loudness map, language per 10 s (+ game module,
                                                 e.g. --game chaosmod: GTA V Chaos Mod effect OCR)
   lp.py split <slug> [--target 25] [--parts N]  split into episodes of ~target edited minutes at speech gaps → work/<slug>/parts.json
-  lp.py speakers <slug> --host B --guest B      co-op stream with two webcams: who says each line (B = x,y,w,h lower-face box)
+  lp.py speakers <slug> [--host B --guest B]    co-op stream with two webcams: who says each line (B = x,y,w,h lower-face box;
+                                                an assembled VOD needs no boxes: its two mics tell)
   lp.py context <slug> <ep>                     transcript + effects + English stretches + loud moments, for writing the EDL
   lp.py draft <slug> <ep> [--force]             first-pass EDL: ranges without cutscenes, effects with names, chapters, metadata
   lp.py faces <slug> <ep>                       contact sheet of the episode's liveliest webcam moments (thumbnail face)
   lp.py frames <slug> <t> [<t> ...]             contact sheet of VOD frames at the given times
   lp.py prep <slug> <ep|all>                    graded episode source at native resolution → public/<slug>-ep<ep>.mp4
+                                                (assembled: one file per track, webcams cut out when assembled --cutout)
+  lp.py see <edits/x.json>                      frame check by a local vision model (Ollama): what each chapter span, caption,
+                                                cold-open hit, Short and the thumbnail show, and whether the label names it
   lp.py check <edits/x.json>                    build the timeline and render a grid of check stills
   lp.py script <edits/x.json>                   the finished edit as a timed script (speech, cuts, captions, banners) to review
   lp.py shorts <edits/x.json>                   (re)render the EDL's Shorts → out/<playlist>/shorts/ (a full render does this too)
@@ -18,12 +25,18 @@
   lp.py publish <edits/x.json> [--at ISO|--now] wait for the user's Studio upload, then apply details, subtitles, playlist;
                                                 schedule/publish only with an explicit --at/--now (the user's go)
   lp.py retention <edits/x.json>                YouTube audience retention of the published episode mapped onto the script
+  lp.py look <edits/x.json> [m:ss ...] [--short K] [--last S]   frames of the rendered episode or Short → work/<vod>/epN-look.png
+  lp.py at <edits/x.json> <m:ss> ... [--vod]    episode time ↔ VOD time, with the line said there
 """
 import argparse, json, os, re, shutil, subprocess, sys, time, wave
+_VENV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv")
+_VPY = os.path.join(_VENV, "Scripts", "python.exe") if os.name == "nt" else os.path.join(_VENV, "bin", "python")
+if os.path.exists(_VPY) and os.path.realpath(sys.prefix) != os.path.realpath(_VENV):  # run with the wrong Python: Whisper and its CUDA wheels live in .venv
+    os.execv(_VPY, [_VPY, *sys.argv])
 from difflib import SequenceMatcher
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from media import GRADE, video_encoder
+from media import GRADE, partner_span, video_encoder
 from trimming import MOTION_FPS, fix_words, loud_db, merge, motion_thr, real_words, trim
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import CFG, about_partner, out_dir, text
@@ -99,6 +112,12 @@ def slug_of(path):
     return f"{title}-{date}".strip("-")
 
 
+def cam_rect(slug):
+    """The webcam rect: where `assemble` put yours, else config "cam"."""
+    p = f"work/{slug}/assemble.json"
+    return json.load(open(p))["boxes"].get("cam") if os.path.exists(p) else CFG.get("cam")
+
+
 def ingest(a):
     slug = a.slug or slug_of(a.vod)
     w, vod = f"work/{slug}", f"footage/{slug}.mp4"
@@ -123,7 +142,7 @@ def ingest(a):
     if not os.path.exists(f"{w}/events.json"):  # laughs, screams, bangs: what the transcript can't show
         run(PY, "scripts/audio_events.py", f"{w}/audio16k.wav", f"{w}/events.json")
     if not os.path.exists(f"{w}/motion.npz"):  # visual action in the game and liveliness in the webcam (config "cam")
-        run(PY, "scripts/motion.py", slug, ",".join(map(str, CFG.get("cam") or [])))
+        run(PY, "scripts/motion.py", slug, ",".join(map(str, cam_rect(slug) or [])))
     if game == "chaosmod" and not os.path.exists(f"{w}/effects.json"):
         game_lib(slug)  # fails early with instructions if the effect name list hasn't been built yet
         run(PY, "games/chaosmod/ocr_effects.py", vod, 0, dur, f"{w}/effects.json")
@@ -255,6 +274,11 @@ def context(a):
     rows += [(t, f"[EFFECT] {n} — {lib.desc(n) or '(no description yet)'}") for t, n in effect_events(a.slug, lo, hi)]
     rows += [(x, f"[{lang.upper()} {fmt(x)}–{fmt(y)}] cutscene or mission dialogue; transcript lines here are unreliable")
              for x, y, lang in foreign_runs(a.slug, lo, hi)]
+    if (sp := partner_span(a.slug)) and (sp[0] > lo or sp[1] < hi):  # partner in the call, but not on tape
+        rows += [(x, f"[NO PARTNER TRACKS {fmt(x)}–{fmt(y)}] the co-op partner's mic, cam and game weren't recorded here, but "
+                     "they're in the call: the streamer's lines may answer someone the viewer can't hear, there are no [GUEST] "
+                     "lines, and the episode needs a \"notes\" banner saying so")
+                 for x, y in ((lo, min(hi, sp[0])), (max(lo, sp[1]), hi)) if y > x]
     rows += [(x, f"[REPEATS {fmt(x)}–{fmt(y)}] transcript loops here: hallucinated, not what was said") for x, y in repeat_runs(segments)]
     rms = np.load(f"{w}/rms100ms.npy")
     loud = [[t, t + 5, rms[t * 10:(t + 5) * 10].max(initial=-99)] for t in range(int(lo), int(hi), 5)]
@@ -317,7 +341,9 @@ def guest_share(slug, a, b):
 
 
 def speakers_cmd(a):
-    run(PY, "scripts/speakers.py", a.slug, a.host, a.guest)
+    if not (a.host and a.guest) and not os.path.exists(f"work/{a.slug}/mics.npz"):
+        sys.exit("give --host and --guest lower-face boxes (only a VOD built by `assemble` has separate mics)")
+    run(PY, "scripts/speakers.py", a.slug, *([a.host, a.guest] if a.host and a.guest else []))
 
 
 def sibling_edl(slug, ep):
@@ -325,6 +351,18 @@ def sibling_edl(slug, ep):
     edls = [json.load(open(f"edits/{f}")) for f in os.listdir("edits") if f.endswith(".json")]
     eps = sorted(((abs(e["episode"] - ep), e["episode"]), e) for e in edls if e.get("vod") == slug and e["episode"] != ep)
     return eps[0][1] if eps else None
+
+
+def partner_note(slug, lo, hi, at):
+    """{"notes": [...]} when the co-op partner's tracks start late or end early inside VOD lo–hi: they're in the call but the
+    viewer can't hear or see them there ({from}/{until} become episode times at build). {} otherwise."""
+    sp = partner_span(slug)
+    if not sp or (sp[0] <= lo and hi <= sp[1]):
+        return {}
+    ph = {"from": "{from}", "until": "{until}"}
+    body = (text("partner_note_none") if sp[1] <= lo or hi <= sp[0] else
+            ", ".join(text(k, **ph) for k, on in (("partner_note_from", sp[0] > lo), ("partner_note_until", sp[1] < hi)) if on))
+    return {"notes": [[fmt(at), text("partner_note"), body, 8]]}
 
 
 def draft(a):
@@ -386,11 +424,11 @@ def draft(a):
     output = re.sub(r"\d+$", str(a.ep), sib["output"]) if sib.get("output") else text("episode_title", series="TODO", n=a.ep)
     e = {"vod": a.slug, "episode": a.ep, "output": output, "style": sib.get("style", "hype"),
          "playlist": sib.get("playlist", "TODO"), "tags": sib.get("tags", []),
-         "cam": sib.get("cam", CFG.get("cam")), "thumb": thumb, "title": title,
+         "cam": sib.get("cam", cam_rect(a.slug)), "thumb": thumb, "title": title,
          "lowerThird": {**copy("lowerThird", {"text": CFG["channel"], "sub": "TODO"}), "at": fmt(rest[0][0] + 3)},
          **({"recap": "auto"} if a.ep > 1 else {}),
          "coldOpen": [[fmt(t), fmt(t + 6), "full"] for t in cold], "intro": [[fmt(x), fmt(y)] for x, y in intro],
-         "main": [[fmt(x), fmt(y)] for x, y in rest], "effects": effects, "captions": [], "faceZooms": [], "gameZooms": [],
+         "main": [[fmt(x), fmt(y)] for x, y in rest], **(partner_note(a.slug, blocks[0][0], blocks[-1][1], rest[0][0] + 1 if rest else blocks[0][0]) if blocks else {}), "effects": effects, "captions": [], "faceZooms": [], "gameZooms": [],
          "chapters": chapters, "endFreeze": {"text": text("to_be_continued") if a.ep < n_parts else text("the_end"), "seconds": 2.5},
          "endScreen": {"seconds": 15, "title": text("coming_next", n=a.ep + 1) if a.ep < n_parts else text("thanks"),
                        "cta": text("subscribe")},
@@ -424,6 +462,13 @@ def script(a):
                         for s in segments if any(a0 <= x["start"] < a1 for x in s["words"]))
         cut = ("~~ whoosh ~~ " if c.get("whoosh") else "| ") + (f"(x{c['rate']:g}) " if "rate" in c else "")
         rows.append((c["from"], f"{cut}[{c['section']} {fmt(a0)}] {said}"))
+    for c in e["clips"] if e.get("guest") else []:  # co-op view switches
+        for x, y in e["guest"]["pov"]:
+            for s, txt in ((x, ">> PARTNER'S VIEW"), (y, "<< OWN VIEW")):
+                if "file" not in c and c["src"] < s < c["src"] + round(c["dur"] * c.get("rate", 1)):
+                    rows.append((c["from"] + round((s - c["src"]) / c.get("rate", 1)), f"   {txt}"))
+            if "file" not in c and x <= c["src"] < y:
+                rows.append((c["from"], "   (partner's view)"))
     rows += [(c["at"], f"   CAPTION {c['text']}") for c in e["captions"]]
     rows += [(x["at"], f"   BANNER {x['name']} — {x['fi']}") for x in e["effects"]]
     rows += [(z["at"], "   FACE ZOOM") for z in e["faceZooms"]] + [(z["at"], "   GAME ZOOM") for z in e["gameZooms"]]
@@ -442,12 +487,66 @@ def script(a):
     print(out, f"{e['duration'] / fps / 60:.1f} min")
 
 
+def speller(lang):
+    """Spell check for the commentary language through libvoikko (Finnish; apt `libvoikko1 voikko-fi`; Arch: `pacman -S
+    libvoikko` plus the prebuilt dict.zip unzipped into ~/.voikko/5/mor-standard/, voikko-fi is AUR-only and needs foma),
+    or None when it isn't installed: then only rarity and Whisper's confidence flag words."""
+    import ctypes, ctypes.util
+    if lang != "fi" or not (name := ctypes.util.find_library("voikko")):
+        return None
+    lib = ctypes.CDLL(name)
+    lib.voikkoInit.restype, lib.voikkoInit.argtypes = ctypes.c_void_p, [ctypes.POINTER(ctypes.c_char_p), ctypes.c_char_p, ctypes.c_char_p]
+    lib.voikkoSpellCstr.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    err = ctypes.c_char_p()
+    h = lib.voikkoInit(ctypes.byref(err), b"fi", None)
+    return (lambda w: lib.voikkoSpellCstr(h, w.encode()) == 1) if h else None
+
+
+SUSPECT_P = 0.45  # Whisper word confidence under this is a suspect
+SUSPECT_RARE = 2  # ...and so is a word the speller rejects that the whole stream says at most this often (colloquial words repeat; mishearings don't)
+
+
+def subtitle_suspects(edl, segments):
+    """Subtitle cues holding a likely mishearing: a word Whisper was unsure of, or one the speller rejects that is rare in
+    the whole transcript. Names in the EDL (title, tags, lower third, wordFixes) are never suspects."""
+    cues = json.load(open(f"work/{edl['vod']}/ep{edl['episode']}.subs.json"))
+    bare = lambda x: re.sub(r"^\W+|\W+$", "", x).lower()
+    count = {}
+    for seg in segments:
+        for w in seg["words"]:
+            count[bare(w["word"])] = count.get(bare(w["word"]), 0) + 1
+    known = {bare(x) for x in re.findall(r"[\w-]+", json.dumps([edl.get("title"), edl.get("tags"), edl.get("lowerThird"), edl.get("wordFixes"),
+                                                                 CFG.get("channel"), CFG.get("transcript_prompt")], ensure_ascii=False))}
+    spell = speller(CFG["language"])
+    out = []
+    for c in cues:
+        bad = []
+        for w in c["words"]:
+            b = bare(w["word"])
+            if not b or b.isdigit() or b in known:
+                continue
+            unsure = w.get("p", 1) < SUSPECT_P
+            wrong = spell is not None and not all(spell(x) for x in b.split("-") if x) and count.get(b, 0) <= SUSPECT_RARE
+            if unsure or wrong:
+                bad.append(w["word"].strip() + (f" ({w['p']:.2f})" if unsure else ""))
+        if bad:
+            out.append((c, bad))
+    return out, spell is not None
+
+
 def proof(a):
     """Proof-read before `check`: a second Whisper pass over just the line of every caption and the whole of every Short
     (a fresh decode without the surrounding context), printed beside the transcript's words and the caption text.
     Caption words heard in neither decode are flagged, and so are transcript words of a Short that the second pass
     doesn't hear (those become the Short's cues and the subtitles): fix them with "wordFixes" in the EDL or by rewriting
     the caption. Written to work/<vod>/epN.proof.txt."""
+    if a.read:
+        import hashlib
+        edl, e = build(a.edl)
+        text = proof_text(edl, e)
+        open(f"work/{edl['vod']}/ep{edl['episode']}.text.txt", "w").write(text)
+        open(proof_stamp(edl), "w").write(hashlib.sha1(text.encode()).hexdigest())
+        return print(f"proof-read text stamped: {proof_stamp(edl)}")
     edl = json.load(open(a.edl))
     w = f"work/{edl['vod']}"
     segments = json.load(open(f"{w}/transcript.json"))["segments"]
@@ -466,7 +565,10 @@ def proof(a):
             a0, b0 = parse_time(x), parse_time(y)
             said = [x["word"].strip() for s in segments for x in s["words"] if a0 <= x["start"] < b0]
             items.append((f"SHORT {k} ({x}–{y})", a0, b0, said, None))
+    run(PY, "scripts/build_edit.py", a.edl)  # the subtitle cues of this build (work/<vod>/epN.subs.json)
+    suspects, spelled = subtitle_suspects(edl, segments)
     windows = [[max(0.0, s - 0.3), e + 0.4] for _, s, e, _, _ in items if s is not None]
+    windows += [[max(0.0, c["words"][0]["start"] - 0.3), c["words"][-1]["end"] + 0.4] for c, _ in suspects]
     tmp = f".tmp/{edl['vod']}-ep{edl['episode']}-proof.json"
     os.makedirs(".tmp", exist_ok=True)
     json.dump(windows, open(tmp, "w"))
@@ -479,7 +581,7 @@ def proof(a):
             continue
         heard = next(second)
         lines += [f"{label}  [{fmt(s)}–{fmt(e)}]", f"  transcript: {' '.join(said)}", f"  2nd pass:   {heard}"]
-        pool = {bare(x) for x in said} | {bare(x) for x in heard.split()}
+        pool = {bare(x) for x in said} | {bare(x) for x in heard.split()} | {bare(x) for x in (edl.get("wordFixes") or {}).values()}  # a fixed spelling counts as heard
         if text is not None:
             lines.append(f"  caption:    {text}")
             if miss := [x for x in text.split() if bare(x) and bare(x) not in pool]:
@@ -489,10 +591,166 @@ def proof(a):
             if diff := [x for x in said if bare(x) and bare(x) not in h]:
                 lines.append(f"  ?? transcript words the 2nd pass doesn't hear (they become cues/subtitles): {' '.join(diff)}")
         lines.append("")
+    lines += [f"== SUBTITLE SUSPECTS ({len(suspects)} cues; " + ("speller + " if spelled else "no speller installed: ")
+              + f"Whisper confidence < {SUSPECT_P}): the 2nd pass beside each; map real mishearings in \"wordFixes\"", ""]
+    for c, bad in suspects:
+        lines += [f"SUB {c['n']} {fmt(c['at'])}  [VOD {fmt(c['words'][0]['start'])}]", f"  subtitle:   {c['text']}",
+                  f"  2nd pass:   {next(second)}", f"  ?? {' · '.join(bad)}", ""]
     out = f"{w}/ep{edl['episode']}.proof.txt"
     open(out, "w").write("\n".join(lines))
     print("\n".join(lines))
     print(out)
+    edl, e = build(a.edl)
+    text_file = f"{w}/ep{edl['episode']}.text.txt"
+    open(text_file, "w").write(proof_text(edl, e))
+    print(f"{text_file}: read it whole (both languages), fix every mishearing, misspelling and stiff translation, then `lp.py proof {a.edl} --read`")
+
+
+def proof_text(edl, e):
+    """Every word the viewer reads, from this build: on-screen text, the Shorts, the subtitles and both languages'
+    title/description/chapters. `proof` writes it to work/<vod>/epN.text.txt for a full proof-read (RULEBOOK 8.7)."""
+    out = f"{out_dir(edl)}/{edl['output']}"
+    tr = CFG.get("translation")
+    lines = [f"== ON SCREEN ({CFG['language']})", f"title: {' · '.join(str(v) for k, v in edl['title'].items() if k not in ('bg',))}",
+             f"lower third: {e['lowerThird']['text']} · {e['lowerThird']['sub']}"
+             + (f" / {e['lowerThird']['guest']['text']} · {e['lowerThird']['guest'].get('sub', '')}" if e["lowerThird"].get("guest") else "")]
+    lines += [f"note {fmt(n['at'] / e['fps'])}: {n['name']} · {n['fi']}" for n in e.get("notes") or []]
+    lines += [f"effect {fmt(x['at'] / e['fps'])}: {x['name']} · {x.get('fi', '')}" for x in e["effects"]]
+    lines += [f"caption {fmt(c['at'] / e['fps'])}: {c['text']}" for c in e["captions"]]
+    lines += [f"card {fmt(c['at'] / e['fps'])}: {c['label']}" for c in e.get("cards") or []]
+    for k, sh in enumerate(build_shorts(edl, e)[0], 1):
+        sh = sh["short"]
+        lines += ["", f"== SHORT {k}: {sh['title']} · {sh['cta']}"] + [f"  {c['text']}" for c in sh["captions"]]
+    lines += ["", f"== DESCRIPTION ({CFG['language']})", open(f"{out}.description.txt").read().strip()]
+    if tr and os.path.exists(f"{out}.{tr}.json"):
+        t = json.load(open(f"{out}.{tr}.json"))
+        lines += ["", f"== TRANSLATION ({tr})", f"title: {t['title']}", f"youtubeTitle: {(edl.get(tr) or {}).get('youtubeTitle', '')}", t["description"].strip()]
+    lines += ["", f"== SUBTITLES ({CFG['language']}.srt)"]
+    for cue in open(f"{out}.{CFG['language']}.srt").read().strip().split("\n\n"):
+        n, times, *txt = cue.split("\n")
+        lines.append(f"{n:>4} {times[:8]}  {' '.join(txt)}")
+    return "\n".join(lines) + "\n"
+
+
+def proof_stamp(edl):
+    return state_path(edl, "proofread.txt")
+
+
+def require_proofread(edl, e):
+    """Render only text that was proof-read: the hash `proof --read` stamped must match this build's text."""
+    import hashlib
+    h = hashlib.sha1(proof_text(edl, e).encode()).hexdigest()
+    if not os.path.exists(proof_stamp(edl)) or open(proof_stamp(edl)).read().strip() != h:
+        sys.exit(f"the text changed since it was proof-read (or never was): `lp.py proof {edl_path_of(edl)}`, read "
+                 f"work/{edl['vod']}/ep{edl['episode']}.text.txt whole, fix it, then `lp.py proof {edl_path_of(edl)} --read`")
+    return h
+
+
+def edl_path_of(edl):
+    return f"edits/{edl['vod']}-ep{edl['episode']}.json"
+
+
+VISION = CFG.get("vision_model", "gemma4:12b")  # local Ollama vision model for `see` (qwen2.5vl:7b answered gibberish on Ollama 0.32)
+SEE_W = 960  # frame width sent to the model (~660 image tokens each)
+
+
+def ask_vision(images, prompt, labelled):
+    """One question to the local vision model about a few frames → {"scene", "label_en", "concrete", "visible", "why"} (Ollama structured output)."""
+    import base64, urllib.error, urllib.request
+    props = {"scene": {"type": "string"}}
+    if labelled:
+        props |= {"label_en": {"type": "string"}, "concrete": {"type": "string", "enum": ["yes", "no"]}, "visible": {"type": "string", "enum": ["yes", "no", "unclear"]}, "why": {"type": "string"}}
+    body = {"model": VISION, "stream": False, "think": False, "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 300},  # 4 frames ≈ 2.7k tokens; the 4k default cut answers off
+            "format": {"type": "object", "properties": props, "required": list(props)},
+            "messages": [{"role": "user", "content": prompt, "images": [base64.b64encode(open(f, "rb").read()).decode() for f in images]}]}
+    url = CFG.get("ollama_url", "http://localhost:11434")
+    try:
+        r = json.load(urllib.request.urlopen(urllib.request.Request(f"{url}/api/chat", json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=900))
+    except urllib.error.URLError as x:
+        sys.exit(f"Ollama at {url} failed: {x}. Install Ollama and run `ollama pull {VISION}` (config \"vision_model\" picks another).")
+    try:
+        return json.loads(r["message"]["content"])
+    except json.JSONDecodeError:
+        return {"scene": r["message"]["content"].replace("\n", " "), "concrete": "yes", "visible": "unclear", "why": "the model's answer was not valid JSON"}
+
+
+def view_file(edl, t):
+    """The footage the viewer sees at VOD time t: the co-op partner's view inside the EDL's "pov" spans."""
+    guest = any(parse_time(a) <= t < parse_time(b) for a, b in edl.get("pov", []))
+    return f"footage/{edl['vod']}{'-guest' if guest else ''}.mp4"
+
+
+def see(a):
+    """Frame check before `check` (RULEBOOK 7.2) by a local vision model: a few frames across every chapter span, caption,
+    cold-open hit, Short and the thumbnail; it says what the game screen shows across them and whether the label names
+    something actually visible. !! = not visible, ?? = unclear: look at the row sheet named on the line, then relabel or drop.
+    Written to work/<vod>/epN.see.txt, row sheets to work/<vod>/see/."""
+    edl = json.load(open(a.edl))
+    slug, cam = edl["vod"], edl.get("cam")
+    en = (edl.get(CFG.get("translation", "")) or {}).get("chapters", [])
+    main_end = max(parse_time(r[1]) for r in edl["main"])
+    items = []  # (key, title, label, [times], spoken)
+    across = lambda a0, b0, n: [a0 + (b0 - a0) * (k + 0.5) / n for k in range(n)]
+    chapters = [(parse_time(t), lab) for t, lab in edl.get("chapters", [])]
+    for i, (t, lab) in enumerate(chapters):
+        if t == 0:
+            continue
+        end = chapters[i + 1][0] if i + 1 < len(chapters) else main_end
+        tr = f" ({en[i]})" if i < len(en) and en[i] != lab else ""
+        items.append((f"chapter{i}", f"CHAPTER {fmt(t)}–{fmt(end)} \"{lab}\"{tr}", lab + tr, [t + 1] + across(t, end, 3 if end - t > 20 else 1), False))  # the card's own moment, then the span
+    for i, (t, _, text) in enumerate(edl.get("captions", [])):
+        items.append((f"caption{i + 1}", f"CAPTION {t} \"{text}\"", text, [parse_time(t), parse_time(t) + 3], True))
+    for i, r in enumerate(edl.get("coldOpen", [])):
+        items.append((f"coldopen{i + 1}", f"COLD OPEN {r[0]}–{r[1]}", None, across(parse_time(r[0]), parse_time(r[1]), 2), False))
+    for i, sh in enumerate(edl.get("shorts", [])):
+        rs = [(parse_time(x), parse_time(y)) for x, y in sh.get("ranges") or [[sh["from"], sh["to"]]]]
+        lab = sh["title"] + (f" ({sh['onScreen']})" if sh.get("onScreen") else "")
+        items.append((f"short{i + 1}", f"SHORT {i + 1} {', '.join(f'{fmt(x)}–{fmt(y)}' for x, y in rs)} \"{lab}\"", lab, [t for x, y in rs for t in across(x, y, 2)], False))
+    if (th := edl.get("thumb")) and th.get("bg"):
+        items.append(("thumb", f"THUMBNAIL {th['bg']} \"{th.get('text', '')}\"", th.get("text"), [parse_time(th["bg"])], False))
+    d, tmp = f"work/{slug}/see", f".tmp/see-{slug}-ep{edl['episode']}"
+    os.makedirs(d, exist_ok=True), os.makedirs(tmp, exist_ok=True)
+    mask = f"drawbox={cam[0]}:{cam[1]}:{cam[2]}:{cam[3]}:black:fill," if cam else ""
+    lines, flagged = [], 0
+    for key, title, label, times, spoken in items:
+        files = []
+        for k, t in enumerate(times):
+            f = f"{tmp}/{key}-{k}.jpg"
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", f"{t:.2f}", "-i", view_file(edl, t), "-frames:v", "1", "-vf", f"{mask}scale={SEE_W}:-2", "-q:v", "4", f], check=True)
+            files.append(f)
+        row = f"{d}/ep{edl['episode']}-{key}.jpg"
+        draw = ";".join(f"[{k}:v]drawtext=text='{fmt(t).replace(':', '.')}':x=6:y=6:fontsize=26:fontcolor=yellow:box=1:boxcolor=black[v{k}]" for k, t in enumerate(times))
+        stack = f"{''.join(f'[v{k}]' for k in range(len(times)))}hstack=inputs={len(times)}" if len(times) > 1 else "[v0]null"
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *[x for f in files for x in ("-i", f)], "-filter_complex", f"{draw};{stack},scale=1440:-2", row], check=True)
+        prompt = (f"{len(times)} frames in time order from one stretch of a video game stream ({edl.get('playlist', 'a game')}). Ignore the stream "
+                  "overlay (chat, alerts, black boxes). scene: in at most 15 words, what the game screen shows across the frames: place, vehicles, "
+                  "action, on-screen text.")
+        if label and spoken:  # a caption is a quote of what the streamer says: most of it is talk with nothing to see
+            prompt += (f" The streamer says \"{label}\" here ({CFG['language']}; shown as a caption). label_en: its literal English "
+                       "translation. concrete: yes only if the line names a concrete on-screen thing or event that should be seen right "
+                       "now (a vehicle, place, object, crash, on-screen text); no for talk, jokes, feelings, plans, remarks about the "
+                       "stream or about people. visible: when concrete, yes if that thing is seen in these frames, no if it is not, "
+                       "unclear if you can't tell; when not concrete, unclear. why: one short reason, naming what is seen instead when no.")
+        elif label:
+            prompt += (f" The editor's label for this stretch is \"{label}\" ({CFG['language']}). label_en: its literal English translation. "
+                       "visible: yes if the concrete thing it names (a vehicle, place, object, event, on-screen text) is seen in these frames; "
+                       "no if that concrete thing is not seen; unclear if the label names nothing concrete (a quote, a feeling, a mission or "
+                       "person name), if you can't translate it, or if you can't tell. concrete: yes. why: one short reason, naming what is seen instead when no.")
+        r = ask_vision(files, prompt, bool(label))
+        lines += [f"{title}   {row}", f"  scene: {r.get('scene', '').strip()}"]
+        if label:
+            v = r.get("visible", "unclear") if r.get("concrete", "yes") == "yes" else "talk"
+            flagged += v == "no"
+            lines.append(f"  {'ok' if v == 'yes' else '!! NOT VISIBLE' if v == 'no' else '-- talk, nothing to see' if v == 'talk' else '?? unclear'} (read as \"{r.get('label_en', '').strip()}\"): {r.get('why', '').strip()}")
+        lines.append("")
+        print("\n".join(lines[-3 - bool(label):]), flush=True)
+    import urllib.request  # unload the model now: Whisper (proof) needs the GPU memory next, and Ollama would keep it for minutes
+    urllib.request.urlopen(urllib.request.Request(f"{CFG.get('ollama_url', 'http://localhost:11434')}/api/generate", json.dumps({"model": VISION, "keep_alive": 0}).encode(), {"Content-Type": "application/json"}))
+    lines.append(f"{flagged} of {sum(1 for i in items if i[2])} labels name something the model doesn't see (model {VISION}; "
+                 "its reading of the label is in quotes: a mistranslation voids the verdict, the scene line still counts)")
+    out = f"work/{slug}/ep{edl['episode']}.see.txt"
+    open(out, "w").write("\n".join(lines) + "\n")
+    print(lines[-1], out, sep="\n")
 
 
 def faces(a):
@@ -540,14 +798,14 @@ def faces(a):
     print(sheet, "times:", ", ".join(fmt(t) for t in picks))
 
 
-def sheet(slug, times, out_file):
-    """Contact sheet of VOD frames at the given m:ss times, three per row."""
+def sheet(slug, times, out_file, view=""):
+    """Contact sheet of VOD frames at the given m:ss times, three per row (view "-guest": the co-op partner's view)."""
     out = f"work/{slug}/frames"
     os.makedirs(out, exist_ok=True)
     tiles = []
     for t in times:
         f = f"{out}/{t.replace(':', '_')}.jpg"
-        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", str(parse_time(t)), "-i", f"footage/{slug}.mp4", "-frames:v", "1",
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", str(parse_time(t)), "-i", f"footage/{slug}{view}.mp4", "-frames:v", "1",
                         "-vf", f"scale={TILE_W}:-2,drawtext=text='{t.replace(':', '.')}':x=6:y=6:fontsize=22:fontcolor=yellow:box=1:boxcolor=black", f], check=True)
         tiles.append(f)
     cols = min(3, len(tiles))
@@ -559,7 +817,67 @@ def sheet(slug, times, out_file):
 
 
 def frames(a):
-    print(sheet(a.slug, a.times, f"work/{a.slug}/frames/sheet-{a.times[0].replace(':', '_')}-{len(a.times)}.jpg"))  # one file per request
+    view = "-guest" if a.guest else ""
+    print(sheet(a.slug, a.times, f"work/{a.slug}/frames/sheet{view}-{a.times[0].replace(':', '_')}-{len(a.times)}.jpg", view))  # one file per request
+
+
+def video_dur(video):
+    """The video stream's length (the file's can be longer: AAC audio runs a frame or two past the picture)."""
+    return float(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=duration", "-of", "csv=p=0", video],
+                                capture_output=True, text=True).stdout)
+
+
+def look_sheet(edl, video, times, name="look"):
+    """Frames of a rendered file at the given seconds, 3 to a row → work/<vod>/epN-<name>.png (times printed in order)."""
+    d = f"{TMP}/look"
+    os.makedirs(d, exist_ok=True)
+    dur = video_dur(video)
+    times = [min(max(0.0, t), dur - 0.1) for t in times]
+    files = []
+    for i, t in enumerate(times):
+        f, pre = f"{d}/{i}.png", max(0.0, t - 2)  # seek 2 s early, then decode to the frame: a fast seek near the end finds nothing
+        run("ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", f"{pre:.3f}", "-i", video, "-ss", f"{t - pre:.3f}", "-frames:v", "1", "-vf", "scale=640:-2", f)
+        files.append(f)
+    cols = min(3, len(files))
+    w, h = (int(x) for x in subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                                            files[0]], capture_output=True, text=True).stdout.strip().split(","))
+    sheet = f"work/{edl['vod']}/ep{edl['episode']}-{name}.png"
+    layout = "|".join(f"{i % cols * w}_{i // cols * h}" for i in range(len(files)))
+    run("ffmpeg", "-nostdin", "-v", "error", "-y", *[x for f in files for x in ("-i", f)], "-filter_complex",
+        f"xstack=inputs={len(files)}:layout={layout}:fill=black" if len(files) > 1 else "null", sheet)
+    print(sheet, " ".join(fmt(t) for t in times))
+    return sheet
+
+
+def look(a):
+    """Look at the rendered episode or a Short: frames at output times and/or spread over the last seconds."""
+    edl = json.load(open(a.edl))
+    video = f"{short_name(edl, a.short)}.mp4" if a.short else f"{out_dir(edl)}/{edl['output']}.mp4"
+    times = [parse_time(t) for t in a.times]
+    if a.last:
+        dur = video_dur(video)
+        times += [dur - a.last + a.last * i / 3 for i in range(1, 4)]
+    if not times:
+        sys.exit("give output times (m:ss) and/or --last S")
+    look_sheet(edl, video, times, f"short{a.short}-look" if a.short else "look")
+
+
+def at(a):
+    """Episode output time ↔ VOD time, with the transcript line said there (--vod: the times are VOD times)."""
+    edl = json.load(open(a.edl))
+    e = json.load(open(props_path(edl)))["edit"]
+    fps, off = e["fps"], part(edl["vod"], edl["episode"])["prepStart"]
+    segs = json.load(open(f"work/{edl['vod']}/transcript.json"))["segments"]
+    said = lambda v: next((s["text"] for s in segs if s["start"] - 0.3 <= v <= s["end"] + 0.3), "")
+    for t in map(parse_time, a.times):
+        if a.vod:
+            f = (t - off) * fps
+            hits = [c["from"] + (f - c["src"]) / c.get("rate", 1) for c in e["clips"] if "file" not in c and c["src"] <= f < c["src"] + round(c["dur"] * c.get("rate", 1))]
+            print(f"VOD {fmt(t)} → episode {', '.join(fmt(h / fps) for h in hits) or 'cut'}  {said(t)}")
+        else:
+            c = next((c for c in e["clips"] if "file" not in c and c["from"] <= t * fps < c["from"] + c["dur"]), None)
+            v = c and off + (c["src"] + (t * fps - c["from"]) * c.get("rate", 1)) / fps
+            print(f"episode {fmt(t)} → VOD {fmt(v) if v else '(title/end card)'}  {said(v) if v else ''}")
 
 
 def prep(a):
@@ -568,10 +886,16 @@ def prep(a):
             prep(argparse.Namespace(slug=a.slug, ep=str(n)))
         return
     a.ep = int(a.ep)
-    p, out = part(a.slug, a.ep), f"public/{a.slug}-ep{a.ep}.mp4"
+    p = part(a.slug, a.ep)
+    off, dur = p["prepStart"], p["prepEnd"] - p["prepStart"]
+    if os.path.exists(f"work/{a.slug}/assemble.json"):  # separate recordings: each source its own track, composited at render
+        sys.path.insert(0, "scripts")
+        for f in __import__("assemble").tracks(a.slug, off, dur, f"public/{a.slug}-ep{a.ep}").values():
+            print(f)
+        return
+    out = f"public/{a.slug}-ep{a.ep}.mp4"
     if os.path.exists(out):
         return print(out, "exists")
-    off, dur = p["prepStart"], p["prepEnd"] - p["prepStart"]
     run("ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-ss", off, "-t", dur, "-i", f"footage/{a.slug}.mp4", "-vf", GRADE,
         "-map", "0:v", "-map", "0:a", *video_encoder(), "-g", 60, "-c:a", "aac", "-b:a", "256k",
         "-movflags", "+faststart", "-f", "mp4", out + ".part.mp4")
@@ -597,12 +921,13 @@ def scale(edl):
 def remotion(edl, *args, props=None):
     """Render with this episode's timeline as input props (work/<vod>/epN.props.json), or the given props file."""
     os.makedirs(TMP, exist_ok=True)
-    run("npx", "remotion", *args, f"--props={props or props_path(edl)}", "--log=error", env={"TMPDIR": TMP})
+    # --timeout: the first frame from a multi-GB track on a cold disk cache takes longer than Remotion's 30 s delayRender limit
+    run("npx", "remotion", *args, f"--props={props or props_path(edl)}", "--timeout=180000", "--log=error", env={"TMPDIR": TMP})
 
 
 def check(a):
     edl, e = build(a.edl)
-    problems = build_shorts(edl, e)[1] + ([] if edl.get("shorts") else ["no shorts picked: add 2–4 to \"shorts\""])
+    problems = build_shorts(edl, e)[1] + ([] if edl.get("shorts") else ["no shorts picked: add up to 4 to \"shorts\" (RULEBOOK 15.0–15.1)"])
     if problems:
         sys.exit("\n".join(problems))
     first = lambda xs: xs[0]["at"] + 30 if xs else e["clips"][len(e["clips"]) // 3]["from"]
@@ -610,6 +935,9 @@ def check(a):
     card = e["cards"][0]["at"] + 40 if e.get("cards") else e["clips"][len(e["clips"]) // 2]["from"] + 10
     picks = [e["clips"][0]["from"] + 30 if e.get("recap") else e["title"]["from"] + 120, first(e["faceZooms"]), stack, first(e["effects"]) + 10,
              card, e["lowerThird"]["from"] + 40, e["freeze"]["from"] + 90, e["end"]["from"] + 200]
+    picks += [n["at"] + 40 for n in e.get("notes") or []][:1]  # a note to the viewer
+    if e["lowerThird"].get("guest") and e.get("tracks"):  # co-op tags take turns: the partner's is in the second half
+        picks.append(e["lowerThird"]["from"] + e["lowerThird"]["dur"] // 2 + 40)
     d = f"work/{edl['vod']}/check"
     os.makedirs(d, exist_ok=True)
     for f in picks:
@@ -617,12 +945,13 @@ def check(a):
     inputs = [x for f in picks for x in ("-i", f"{d}/{f}.jpg")]
     sheet = f"work/{edl['vod']}/ep{edl['episode']}-check.jpg"
     w, h = meta(edl["vod"])["width"], meta(edl["vod"])["height"]
-    layout = "|".join(f"{i % 2 * w}_{i // 2 * h}" for i in range(8))
-    run("ffmpeg", "-nostdin", "-v", "error", "-y", *inputs, "-filter_complex", f"xstack=inputs=8:layout={layout},scale=1280:-2", sheet)
+    layout = "|".join(f"{i % 2 * w}_{i // 2 * h}" for i in range(len(picks)))
+    run("ffmpeg", "-nostdin", "-v", "error", "-y", *inputs, "-filter_complex", f"xstack=inputs={len(picks)}:layout={layout}:fill=black,scale=1280:-2", sheet)
     print(sheet)
 
 
 MASTER = "acompressor=threshold=-24dB:ratio=2.5:attack=8:release=180:makeup=2,loudnorm=I=-14:TP=-1:LRA=11"
+master = lambda e: f"{MASTER},atrim=end={e['duration'] / e['fps']:.6f}"  # loudnorm can run the audio ~0.1 s past the last frame
 
 
 SR = 48000
@@ -631,6 +960,7 @@ SFX_TAIL = 120  # frames a sound effect may ring on after its element ends
 
 def render(a):
     edl, e = build(a.edl)
+    require_proofread(edl, e)
     out = f"{out_dir(edl)}/{edl['output']}"
     common = (f"--concurrency={CONCURRENCY}", f"--scale={scale(edl)}")
     ranges = a.patch and patch_ranges(edl, e, a.patch)
@@ -642,14 +972,15 @@ def render(a):
         raw = f"{out}.raw.mp4"
         remotion(edl, "render", "src/index.ts", "LetsPlay", raw, *common, "--crf=17", "--audio-bitrate=320k")
         run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", raw, "-vn", "-c:a", "pcm_s16le", "-ar", SR, state_path(edl, "mix.wav"))
-        run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", raw, "-c:v", "copy", "-af", MASTER,
+        run("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", raw, "-c:v", "copy", "-af", master(e),
             "-ar", SR, "-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart", f"{out}.new.mp4")
         os.remove(raw)
         finish(f"{out}.new.mp4", f"{out}.mp4", edl, e)
     json.dump(e, open(state_path(edl, "rendered.json"), "w"))
     remotion(edl, "still", "src/index.ts", "Thumbnail", f"{out}.jpg")
-    if not ranges:  # full render: the Shorts too (a patch leaves them alone; `lp.py shorts` re-renders them)
-        render_shorts(edl, e)
+    render_shorts(edl, e, changed_only=ranges is not None)  # a patch re-renders only the Shorts whose props changed
+    if ranges:  # what the patch changed, to look at: work/<vod>/epN-look.png
+        look_sheet(edl, f"{out}.mp4", [t for a, b in ranges for t in (a / e["fps"] + 1, (a + b) / 2 / e["fps"])])
     lufs = subprocess.run(["ffmpeg", "-nostdin", "-i", f"{out}.mp4", "-vn", "-af", "ebur128", "-f", "null", "-"],
                           capture_output=True, text=True).stderr
     print(f"{out}.mp4  {e['duration'] / 60 / 60:.1f} min  {re.findall(r'I:\s+(-?[\d.]+ LUFS)', lufs)[-1]}")
@@ -703,9 +1034,13 @@ def patch_ranges(edl, e, spec):
         if old is None:
             print("no record of the previous timeline: full render")
             return None
-        if any(old.get(k) != e.get(k) for k in ("fps", "source", "cam", "style")):
+        if any(old.get(k) != e.get(k) for k in ("fps", "source", "cam", "style", "tracks")):
             print("source, webcam or style changed: full render")
             return None
+        pv = lambda x: {tuple(sp) for sp in (x.get("guest") or {}).get("pov", [])}
+        for a, b in pv(old) ^ pv(e):  # a changed "pov" span: re-render every clip that shows any of it
+            ranges += [(c["from"], c["from"] + c["dur"] + e.get("xfade", 0)) for c in e["clips"]
+                       if "file" not in c and c["src"] < b and a < c["src"] + c["dur"] + e.get("xfade", 0)]
         if old["duration"] != e["duration"]:  # timing shifted: everything after the first difference moves
             first = min((min(s1[2], s2[2]) for s1, s2 in zip(item_spans(old), item_spans(e)) if s1[1] != s2[1]), default=0)
             ranges.append((max(0, first), e["duration"]))
@@ -826,7 +1161,7 @@ def render_patch(edl, e, out, common, ranges):
     run("ffmpeg", "-nostdin", "-v", "error", "-y", *[x for w in audio for x in ("-i", w)], "-filter_complex",
         "".join(f"[{i}:a]" for i in range(len(audio))) + f"concat=n={len(audio)}:v=0:a=1", "-c:a", "pcm_s16le", mix_new)
     run("ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "concat", "-safe", 0, "-i", lst, "-i", mix_new, "-map", "0:v", "-map", "1:a",
-        "-c:v", "copy", "-af", MASTER, "-ar", SR, "-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart", new)
+        "-c:v", "copy", "-af", master(e), "-ar", SR, "-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart", new)
     finish(new, old, edl, e)
     os.replace(mix_new, state_path(edl, "mix.wav"))
     for f in tmp + [lst]:
@@ -834,6 +1169,7 @@ def render_patch(edl, e, out, common, ranges):
 
 
 LINK_TODO = "(link)"  # replaced by the episode's URL once it is known
+SHORT_HOLD_S = 1.0  # a Short ends on its last frame held (Short.tsx Hold): never a dead stop on the last word
 SHORT_MIN, SHORT_MAX = 8, 60  # seconds; under a minute is where Shorts perform best
 
 
@@ -856,12 +1192,12 @@ CUE_WORDS, CUE_SPAN = 4, 1.6  # Shorts are watched muted: every line is captione
 
 def short_cues(words, clips, fps, off):
     """Word-by-word captions for every spoken word inside a Short's clips: {at, text, words, dur} in Short frames."""
-    shown = [(c["from"] + round((w["start"] - off) * fps) - c["src"], max(1, round((w["end"] - w["start"]) * fps)), w["word"].strip())
+    shown = [(c["from"] + round((w["start"] - off) * fps) - c["src"], max(1, round((w["end"] - w["start"]) * fps)), w["word"].strip(), w.get("glued"))
              for c in clips for w in words if c["src"] <= (w["start"] - off) * fps < c["src"] + c["dur"]]
     cues = []
-    for at, d, word in shown:
+    for at, d, word, glued in shown:  # glued: the rest of a phrase wordFix, kept on its first word's cue
         cur = cues[-1] if cues else None
-        if cur and len(cur["words"]) < CUE_WORDS and at - cur["at"] <= CUE_SPAN * fps and at - cur["end"] < 0.5 * fps and cur["text"][-1:] not in ".?!":
+        if cur and glued or cur and len(cur["words"]) < CUE_WORDS and at - cur["at"] <= CUE_SPAN * fps and at - cur["end"] < 0.5 * fps and cur["text"][-1:] not in ".?!":
             cur["words"].append(at - cur["at"])
             cur["text"] += " " + word
             cur["end"] = at + d
@@ -888,15 +1224,19 @@ def build_shorts(edl, e):
         ranges = [[parse_time(x), parse_time(y)] for x, y in sh.get("ranges") or [[sh["from"], sh["to"]]]]
         label = ", ".join(f"{fmt(x)}–{fmt(y)}" for x, y in ranges)
         total = sum(y - x for x, y in ranges)
-        if not SHORT_MIN <= total <= SHORT_MAX or any(x < p["prepStart"] or y > p["prepEnd"] or y <= x for x, y in ranges):
-            problems.append(f"short {k} ({label}): must total {SHORT_MIN}–{SHORT_MAX} s inside this episode's footage")
+        if not SHORT_MIN <= total <= SHORT_MAX - SHORT_HOLD_S or any(x < p["prepStart"] or y > p["prepEnd"] or y <= x for x, y in ranges):
+            problems.append(f"short {k} ({label}): must total {SHORT_MIN}–{SHORT_MAX - SHORT_HOLD_S:g} s (+ {SHORT_HOLD_S:g} s end hold) inside this episode's footage")
             continue
-        if (g := max(guest_share(edl["vod"], x, y) for x, y in ranges)) > 0.35:
+        seen = lambda x, y: any(parse_time(a) <= x and y <= parse_time(b) for a, b in edl.get("pov", []))  # in the partner's view
+        if (g := max(0 if seen(x, y) else guest_share(edl["vod"], x, y) for x, y in ranges)) > 0.35:
             msg = f"short {k} ({label}): {g:.0%} of the talking is the co-op guest, whose gameplay isn't in this stream"
             if not sh.get("onScreen"):  # the labels are mouth-motion guesses: an "onScreen" note says the frames were checked
                 problems.append(msg + "; pick a moment of the streamer's own, or say what the streamer's screen shows in \"onScreen\"")
                 continue
             print(f"warning: {msg}; kept because onScreen = {sh['onScreen']!r}")
+        if (sp := partner_span(edl["vod"])) and any(x < sp[0] or y > sp[1] for x, y in ranges):
+            print(f"warning: short {k} ({label}): the co-op partner's mic isn't recorded here, though they're in the call: "
+                  "a Short has no note banner, so make sure it doesn't answer or react to someone the viewer can't hear")
         clips, cur = [], 0
         for x, y in ranges:
             d = round((y - x) * fps)
@@ -914,18 +1254,21 @@ def build_shorts(edl, e):
                     res.append({**x, "at": f})
             return res
         big = inside(e["captions"], "text")
-        cues = [c for c in short_cues(words, clips, fps, off) if not any(b["at"] - 10 <= c["at"] < b["at"] + b["dur"] for b in big)]
+        cues = [c for c in short_cues(words, clips, fps, off)  # a cue whose words run into a big caption would say them twice
+                if not any(b["at"] - 10 < c["at"] + max(1, c["dur"] - 45) and c["at"] < b["at"] + b["dur"] for b in big)]
         captions = sorted(cues + [{**b, "big": True} for b in big], key=lambda c: c["at"])
-        out.append({"short": {"source": e["source"], "fps": fps, "style": e["style"], "clips": clips, "dur": cur,
+        out.append({"short": {"source": e["source"], "fps": fps, "style": e["style"], "clips": clips, "dur": cur + round(SHORT_HOLD_S * fps), "hold": round(SHORT_HOLD_S * fps),
                               "cropX": sh.get("cropX", 420), "cam": e["cam"], "title": sh["title"],
                               "tag": tag, "cta": text("full_episode", episode=edl["title"].get("episode", "")).strip(),
-                              "text": {"channel": CFG["channel"], "from_stream": text("from_stream"),
+                              "text": {"channel": CFG["channel"], "from_stream": edl.get("fromStream") or text("from_stream"), "partner": edl["lowerThird"].get("guest"),
                                        "effect_label": effect_label(edl)},
-                              "captions": captions, "effects": inside(e["effects"], "name")}})
+                              "captions": captions, "effects": inside(e["effects"], "name"), "guest": e.get("guest"), "tracks": e.get("tracks")}})
     return out, problems
 
 
-def render_shorts(edl, e):
+def render_shorts(edl, e, changed_only=False):
+    """Render the Shorts; changed_only (a patch render) skips a Short whose props and file are unchanged since its last
+    render. A change in Short.tsx alone isn't seen: `lp.py shorts` renders them all."""
     shorts, problems = build_shorts(edl, e)
     if problems:
         sys.exit("\n".join(problems))
@@ -933,6 +1276,9 @@ def render_shorts(edl, e):
     yt_id = json.load(open(state_path(edl, "youtube.json")))["id"] if os.path.exists(state_path(edl, "youtube.json")) else None
     for k, props in enumerate(shorts, 1):
         pf, name = state_path(edl, f"short{k}.props.json"), short_name(edl, k)
+        if changed_only and os.path.exists(f"{name}.mp4") and os.path.exists(pf) and json.load(open(pf)) == props:
+            print(f"short {k} unchanged")
+            continue
         json.dump(props, open(pf, "w"), ensure_ascii=False)
         raw = f"{name}.raw.mp4"
         remotion(edl, "render", "src/index.ts", "Short", raw, f"--concurrency={CONCURRENCY}", "--crf=17", "--audio-bitrate=320k",
@@ -943,13 +1289,14 @@ def render_shorts(edl, e):
         sh = edl["shorts"][k - 1]
         link = f"https://youtu.be/{yt_id}" if yt_id else LINK_TODO
         with open(f"{name}.txt", "w") as fh:
-            fh.write(f"{sh['title'].capitalize()[:90]} #shorts\n\n{text('short_description', output=edl['output'], link=link)}\n\n"
+            fh.write(f"{sh['title'].capitalize()} – {edl['output'].rsplit(' - ', 1)[0]} #shorts\n\n{text('short_description', output=edl['output'], link=link)}\n\n"
                      + " ".join("#" + re.sub(r"\W", "", t) for t in edl.get("tags", [])[:5]) + "\n")
         print(f"{name}.mp4  {props['short']['dur'] / e['fps']:.0f} s")
 
 
 def shorts(a):
     edl, e = build(a.edl)
+    require_proofread(edl, e)
     render_shorts(edl, e)
 
 
@@ -961,6 +1308,10 @@ def publish(a):
     edl = json.load(open(a.edl))
     out, state = f"{out_dir(edl)}/{edl['output']}.mp4", state_path(edl, "youtube.json")
     length = probe_duration(out)
+    e = json.load(open(props_path(edl)))["edit"]  # the description, subtitles and translation come from this build; they must match the mp4
+    if abs(e["duration"] / e["fps"] - length) > 1:
+        sys.exit(f"{out} is {length:.0f} s but the current build is {e['duration'] / e['fps']:.0f} s: its description/subtitles don't fit the "
+                 "rendered file (a later build rewrote them). Re-render (--patch) or rebuild the EDL that was rendered before publishing.")
     vid = json.load(open(state))["id"] if os.path.exists(state) else None
     taken = {json.load(open(f"work/{d}/{f}"))["id"] for d in os.listdir("work") if os.path.isdir(f"work/{d}")
              for f in os.listdir(f"work/{d}") if f.endswith(".youtube.json")} - {vid}
@@ -1065,12 +1416,29 @@ s = sub.add_parser("publish"); s.add_argument("edl")
 g = s.add_mutually_exclusive_group(); g.add_argument("--at", help="schedule: ISO time, e.g. 2026-10-30T16:00:00+02:00")
 g.add_argument("--now", action="store_true", help="make public immediately")
 s = sub.add_parser("frames"); s.add_argument("slug"); s.add_argument("times", nargs="+")
-s = sub.add_parser("speakers"); s.add_argument("slug"); s.add_argument("--host", required=True); s.add_argument("--guest", required=True)
-for c in ("check", "script", "shorts", "retention", "proof", "render"):
+s.add_argument("--guest", action="store_true", help="the co-op partner's view (footage/<slug>-guest.mp4)")
+s = sub.add_parser("look"); s.add_argument("edl"); s.add_argument("times", nargs="*", metavar="M:SS")
+s.add_argument("--short", type=int, metavar="K", help="Short K instead of the episode"); s.add_argument("--last", type=float, metavar="S", help="3 frames over the last S seconds")
+s = sub.add_parser("at"); s.add_argument("edl"); s.add_argument("times", nargs="+", metavar="M:SS")
+s.add_argument("--vod", action="store_true", help="the times are VOD times: where they land in the episode")
+s = sub.add_parser("speakers"); s.add_argument("slug"); s.add_argument("--host"); s.add_argument("--guest")
+s = sub.add_parser("assemble"); s.add_argument("slug"); s.add_argument("--game", required=True, help="your gameplay recording (the clock)")
+for f in ("--cam", "--guest-cam", "--guest-game"):
+    s.add_argument(f)
+s.add_argument("--kdenlive", help="Kdenlive project with the files aligned on its timeline")
+s.add_argument("--offset", action="append", metavar="ROLE=M:SS", help="cam/guestcam/guestgame: where its 0:00 is on the gameplay clock (-m:ss if it started first)")
+for f in ("--cam-box", "--guest-cam-box", "--guest-game-box"):
+    s.add_argument(f, metavar="X,Y,W", help="box in gameplay pixels, height from the source's aspect; negative X/Y count from the right/bottom")
+s.add_argument("--gain", action="append", metavar="ROLE=DB", help="game/cam/guestcam: dB on top of the measured level")
+s.add_argument("--preview", metavar="M:SS", help="only a 20 s clip from there → work/<slug>/assemble-preview.mp4")
+s.add_argument("--cutout", action="store_true", help="webcam backgrounds transparent (GPU matting; boxes side by side on the bottom edge)")
+for c in ("check", "script", "shorts", "retention", "proof", "see", "render"):
     s = sub.add_parser(c); s.add_argument("edl")
+    if c == "proof":
+        s.add_argument("--read", action="store_true", help="the text file was read whole and fixed: stamp it so render accepts it")
 s.add_argument("--patch", nargs="?", const="auto", metavar="RANGES",
                help="re-render only what changed and splice it in: auto (default; diff against the last render), end, "
                     "m:ss-m:ss output-time ranges, comma-separated (e.g. auto,end or 12:30-13:10)")
 a = ap.parse_args()
-{"stats": lambda a: run(PY, "scripts/session_stats.py", a.session), "ingest": ingest, "split": split, "context": context, "draft": draft, "faces": faces, "frames": frames, "prep": prep, "speakers": speakers_cmd,
- "check": check, "render": render, "script": script, "proof": proof, "shorts": shorts, "publish": publish, "retention": retention}[a.cmd](a)
+{"stats": lambda a: run(PY, "scripts/session_stats.py", a.session), "ingest": ingest, "split": split, "context": context, "draft": draft, "faces": faces, "frames": frames, "prep": prep, "speakers": speakers_cmd, "assemble": lambda a: __import__("assemble").assemble(a),
+ "check": check, "render": render, "look": look, "at": at, "script": script, "proof": proof, "see": see, "shorts": shorts, "publish": publish, "retention": retention}[a.cmd](a)

@@ -21,7 +21,7 @@ Built for a Finnish GTA V Chaos Mod channel; the language, names and game module
 ## How it works
 
 ```
-VOD ─ ingest ─ split ─┬─ episode 1: draft → edit (Claude) → check → script review → render → publish
+VOD ─ ingest ─ split ─┬─ episode 1: draft → edit (Claude) → see → proof → check → script review → render → publish
                       ├─ episode 2: …
                       └─ prep all (graded sources, in the background)
 ```
@@ -34,6 +34,7 @@ VOD ─ ingest ─ split ─┬─ episode 1: draft → edit (Claude) → check 
 | `draft <slug> <ep>` | first-pass edit: ranges without cutscenes or transcript hallucinations, effects, chapter candidates, a cold-open montage of the liveliest moments, a contact sheet of the decision points |
 | `context <slug> <ep>` | the episode as text (speech with start–end, effects, cutscenes, loud moments, laughs/screams/bangs, on-screen action, webcam reactions) for the editor |
 | `frames`, `faces` | contact sheets of moments and of the liveliest webcam frames (thumbnail face) |
+| `see <edit>` | frame check by a local vision model (Ollama): what the game shows across every chapter, caption, cold-open hit, Short and the thumbnail, and whether each label names something visible |
 | `check <edit>` | build the timeline, report every problem at once, render a grid of check stills |
 | `script <edit>` | the finished edit as a timed script, for reviewing it the way a viewer meets it |
 | `render <edit> [--patch [ranges]]` | render, master to −14 LUFS, thumbnail, Shorts; `--patch` re-renders only what changed |
@@ -66,7 +67,8 @@ powershell -ExecutionPolicy Bypass -File install-deps.ps1   # Windows (uses wing
 Then edit `config.json` (your name, VOD folder, language, texts, the webcam rect `cam`, a `transcript_prompt` line in the
 streamer's own slang that steers Whisper to colloquial spelling, and for co-op streams `partner_words`, the second-person
 forms of the language, which mark the streamer talking about the partner's game) and run `npm test`. The audio-event model (YAMNet, Apache 2.0)
-is fetched into `models/` on first use. For GTA V Chaos Mod streams, also run
+is fetched into `models/` on first use. The frame check (`see`) needs [Ollama](https://ollama.com) with a vision model:
+`ollama pull gemma4:12b` (config `vision_model` picks another; `qwen2.5vl:7b` answered gibberish on Ollama 0.32). For GTA V Chaos Mod streams, also run
 `.venv/bin/python games/chaosmod/build_names.py` once (on Windows: `.venv\Scripts\python games\chaosmod\build_names.py`).
 The Windows script writes `.mcp.json` with the Windows venv path, so it shows as modified in git; on Linux and macOS the
 committed file is already right.
@@ -76,13 +78,14 @@ screen in production status, create a Desktop-app OAuth client and save its JSON
 `~/.config/letsplay-youtube/client_secret.json`, enable the YouTube Analytics API too (audience retention), then run
 `.venv/bin/python scripts/youtube_mcp.py auth`. API uploads
 from unaudited projects are locked to private, so the workflow leaves the upload to you in YouTube Studio and fills in
-everything else; end screens and the game title are Studio-only.
+everything else; end screens, the game title, a Short's "related video" link and thumbnail tests are Studio-only.
 
 ## Making an episode
 
 In Claude Code, from the repository root: `/letsplay make episode 1 of <VOD>`. The skill
 (`.claude/skills/letsplay/SKILL.md`) has the whole procedure and the edit-file schema; `RULEBOOK.md` is every editorial rule, numbered; `LEARNINGS.md`
-is the running memory, read at the start of every run and appended at the end, so corrections carry over. To run an
+is the running memory, read at the start of every run and appended at the end, so corrections carry over; `ROADMAP.md`
+is the researched, unbuilt pipeline work (chat signal, vocal stem, forced alignment, replay heatmap). To run an
 episode unattended and follow it from your phone:
 
 ```sh

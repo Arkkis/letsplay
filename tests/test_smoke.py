@@ -4,7 +4,7 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENV = {**os.environ, "LETSPLAY_CONFIG": os.path.join(ROOT, "config.example.json")}
-COMMANDS = "ingest split context draft faces frames prep check script shorts render publish stats retention proof".split()
+COMMANDS = "assemble ingest split speakers context draft faces frames prep check script shorts render publish stats retention proof see".split()
 
 
 class Smoke(unittest.TestCase):

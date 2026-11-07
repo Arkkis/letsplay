@@ -1,15 +1,17 @@
 """Who speaks each transcript line on a co-op stream with two webcams: the streamer ("host") or the partner ("guest").
 
-Both voices share one audio track and voice embeddings can't tell them apart, so it reads the webcams: mouth movement
+A VOD built by `lp.py assemble` has each mic's loudness on the VOD clock (work/<slug>/mics.npz): the line goes to the
+mic that is clearly louder during it (MIC_LEAD dB; the other mic only hears bleed). Otherwise both voices share one audio track and voice embeddings can't tell them apart, so it reads the webcams: mouth movement
 (frame difference at 10 fps) in a box over each person's lower face, each normalised by its own median. The clearly
 livelier mouth during a line is the speaker; "?" when neither is.
-  speakers.py <slug> <host x,y,w,h> <guest x,y,w,h>   (lower-face boxes in VOD pixels)
+  speakers.py <slug> [<host x,y,w,h> <guest x,y,w,h>]   (lower-face boxes in VOD pixels; omit to use mics.npz)
   → work/<slug>/speakers.json: {"host": box, "guest": box, "segments": [{"start", "end", "spk": "host"|"guest"|"?"}]}
 """
 import json, os, subprocess, sys
 import numpy as np
 
 FPS, SIDE, LEAD = 10, 32, 1.15
+MIC_LEAD = 6  # dB
 
 
 def motion(slug, boxes):
@@ -31,15 +33,23 @@ def motion(slug, boxes):
     return res
 
 
-def main(slug, host, guest):
-    boxes = [[int(v) for v in b.split(",")] for b in (host, guest)]
-    h, g = motion(slug, boxes)
+def main(slug, host=None, guest=None):
+    if host:
+        boxes = [[int(v) for v in b.split(",")] for b in (host, guest)]
+        h, g = motion(slug, boxes)
+        lead = lambda x: np.log(x) / np.log(LEAD)  # ratio of mouth movement, in units of LEAD
+        res = {"host": boxes[0], "guest": boxes[1]}
+    else:
+        m = np.load(f"work/{slug}/mics.npz")
+        h, g = (10 ** (m[k] / 10) for k in ("host", "guest"))  # power, so a line's mean is its energy
+        lead = lambda x: 10 * np.log10(x) / MIC_LEAD
+        res = {"mics": True}
     out = []
     for s in json.load(open(f"work/{slug}/transcript.json"))["segments"]:
         i, j = int(s["start"] * FPS), max(int(s["end"] * FPS), int(s["start"] * FPS) + 1)
-        mh, mg = h[i:j].mean(), g[i:j].mean()
-        out.append({"start": s["start"], "end": s["end"], "spk": "host" if mh >= LEAD * mg else "guest" if mg >= LEAD * mh else "?"})
-    json.dump({"host": boxes[0], "guest": boxes[1], "segments": out}, open(f"work/{slug}/speakers.json", "w"))
+        r = lead(max(h[i:j].mean(), 1e-12) / max(g[i:j].mean(), 1e-12))
+        out.append({"start": s["start"], "end": s["end"], "spk": "host" if r >= 1 else "guest" if r <= -1 else "?"})
+    json.dump({**res, "segments": out}, open(f"work/{slug}/speakers.json", "w"))
     n = {k: sum(x["spk"] == k for x in out) for k in ("host", "guest", "?")}
     print(f"speakers: host {n['host']}, guest {n['guest']}, unclear {n['?']} lines")
 
