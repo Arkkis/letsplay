@@ -71,6 +71,14 @@ into `RULEBOOK.md` as a numbered rule and delete it here. Keep this file under ~
   frame with a hit, under the call to the full episode.
 - 2026-11-04 `see` on spoken captions: 12 of 23 "NOT VISIBLE" were quotes with nothing to show. Captions are now asked
   whether they name something concrete first; talk reads `-- talk, nothing to see`.
+- 2026-11-08 User (RE6 Osa 7): cutting the cold-open grab out of main between two `pov` switches gave three cuts in
+  8 s at 3:48, confusing; a "Mission Failed" cold open without the failure shown made no sense; Finnish subtitles not
+  wanted. Now RULEBOOK 5.4 exception, 6.10, 6.11, 14.6 (config `"subtitles": false`).
+- 2026-11-08 Co-op `pov` spans must cover a Short's whole range, or `check` counts its guest talk and refuses it; two
+  spans 13 s apart flip the view back and forth: join them. `check` also refuses a caption within ±0.3 s of a guest line.
+- 2026-11-08 User (RE6 Osa 7): "vetää turvaa" was "vetää turpaan"; captions and cues must make sense with what
+  happens on screen. Four weak captions dropped, Short 3 moved to start on its setup line, Short 2 trimmed to 20 s.
+  Now RULEBOOK 8.4b–8.4c (re-decode from the speaker's own track).
 
 ## Pipeline
 
@@ -173,6 +181,17 @@ into `RULEBOOK.md` as a numbered rule and delete it here. Keep this file under ~
   whoever's view is on screen in the slot (guestcam inside pov spans, the hold too); Shorts 1 and 2 re-rendered. Any
   hand-run `remotion still` needs `TMPDIR=.tmp` like `lp.py` sets: without it Remotion copied the 8.7 GB host track into
   the /tmp RAM disk and failed with ENOSPC.
+- 2026-11-08 RE6 from full OBS multitrack recordings: `assemble` with a derived mic mix and a hand-written `mics.npz`;
+  sync by cross-correlating each mic against the Discord track beat Kdenlive's rough alignment. Dummy `parts.json`
+  entries number a series continued from episodes made before the pipeline (Osa 7).
+- 2026-11-08 `wordFixes` keys ending in punctuation never match: use plain words or phrases.
+- 2026-11-08 zsh: `pgrep -f pattern` matches its own shell (use `[x]yz`); unquoted `$T` doesn't word-split (`${=T}`).
+- 2026-11-08 Remotion at concurrency 14 (cpu/2) on 2560p ran the 31 GB machine out of memory with a browser open and
+  the render was killed; concurrency 6 finished (16.6 min episode: ~65 min, Shorts ~15 min).
+- 2026-11-08 User asked: one series in a row or several interleaved? Interleave (later parts lose most viewers, episode
+  views come from subscribers, each new series' osa 1 is the discovery shot; numbers in work/channel-stats.md). Schedule: one fixed weekday per series
+  (GTA 3 Co-op Mon, Vice City Wed, RE6 Fri), one Short a day, never two series' Shorts on one day; Shorts mix series
+  so no series runs more than ~3 days straight.
 
 ## Measurements
 
@@ -249,6 +268,8 @@ into `RULEBOOK.md` as a numbered rule and delete it here. Keep this file under ~
   fixes run, so a fix that has to bring a dropped word back puts it in the value ("mä luottanut" → "mä oon luottanut").
 - 2026-11-05 GTA 3 Co-op Osa 2: the guest's lower third (second half of `lowerThird.dur`) ran into the first caption, 6 s
   later. Put the lower third where no caption falls within ~10 s of it.
+- 2026-11-08 RE6 co-op Osa 7: 16.6 min, -13.6 LUFS, 73 clips, 11 captions, 7 chapters, 5→4 pov spans, 1 cold-open hit,
+  4 Shorts (9–31 s). Main render at concurrency 6 with swap pressure ~65 min.
 
 ## Channel stats
 

@@ -514,10 +514,15 @@ def wrap(text):
     return text[:cut] + "\n" + text[cut + 1:]
 
 
-with open(f"{OUT}/{edl['output']}.{CFG['language']}.srt", "w") as fh:
-    nxt = [c[0] for c in cues[1:]] + [cursor / FPS]  # hold short cues for 1 s, but never into the next one
-    fh.writelines(f"{n}\n{srt_time(a)} --> {srt_time(min(max(b, a + 1.0), z))}\n{wrap(text)}\n\n"
-                  for n, ((a, b, text, _), z) in enumerate(zip(cues, nxt), 1))
+SRT = f"{OUT}/{edl['output']}.{CFG['language']}.srt"
+if not CFG.get("subtitles", True):  # config "subtitles": false: the channel publishes no subtitle track
+    if os.path.exists(SRT):
+        os.remove(SRT)
+else:
+    with open(SRT, "w") as fh:
+        nxt = [c[0] for c in cues[1:]] + [cursor / FPS]  # hold short cues for 1 s, but never into the next one
+        fh.writelines(f"{n}\n{srt_time(a)} --> {srt_time(min(max(b, a + 1.0), z))}\n{wrap(text)}\n\n"
+                      for n, ((a, b, text, _), z) in enumerate(zip(cues, nxt), 1))
 
 print(f"{len(clips)} clips (<2s: {sum(c['dur'] < 120 for c in clips)}), {cursor / FPS / 60:.1f} min total, "
       f"effects={len(effects)} captions={len(captions)} faceZooms={len(face_zooms)} gameZooms={len(game_zooms)} punches={len(out['punches'])} "

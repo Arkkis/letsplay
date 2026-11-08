@@ -625,8 +625,11 @@ def proof_text(edl, e):
     if tr and os.path.exists(f"{out}.{tr}.json"):
         t = json.load(open(f"{out}.{tr}.json"))
         lines += ["", f"== TRANSLATION ({tr})", f"title: {t['title']}", f"youtubeTitle: {(edl.get(tr) or {}).get('youtubeTitle', '')}", t["description"].strip()]
+    srt = f"{out}.{CFG['language']}.srt"
+    if not os.path.exists(srt):  # config "subtitles": false
+        return "\n".join(lines) + "\n"
     lines += ["", f"== SUBTITLES ({CFG['language']}.srt)"]
-    for cue in open(f"{out}.{CFG['language']}.srt").read().strip().split("\n\n"):
+    for cue in open(srt).read().strip().split("\n\n"):
         n, times, *txt = cue.split("\n")
         lines.append(f"{n:>4} {times[:8]}  {' '.join(txt)}")
     return "\n".join(lines) + "\n"

@@ -5,6 +5,7 @@ out/
 work/
 .tmp/
 public/*.mp4
+public/*.webm
 public/music/*.mp3
 # the channel's own settings and episode edits
 config.json

@@ -173,6 +173,8 @@ def apply_episode(video_id: str, output: str, tags: list[str] | None = None) -> 
     except ValueError:
         pass  # episode has no English translation
     try:
+        if not CFG.get("subtitles", True):
+            raise ValueError("subtitles off in config")
         set_captions(y, video_id, out_file(output, f".{lang}.srt"), lang, CFG.get("subtitle_name", lang))
         done.append(f"{lang} subtitles")
     except ValueError:

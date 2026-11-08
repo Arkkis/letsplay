@@ -129,7 +129,7 @@ by you and every edit is reviewed by you before it renders. Never ship a draft a
       admin left, do captions/banners/zooms land on the right beat, does each `CHAPTER CARD` sit where its beat starts
       and does its label cover everything up to the next card, is anything repeated or confusing? Fix and re-run until it reads like a finished episode.
    9. `lp.py render edits/<slug>-epN.json` → `out/<playlist>/<output>.mp4` (≈ 17–27 min), `<output>.jpg` (thumbnail),
-      `<output>.description.txt`, `.<language>.srt`, `.<translation>.json`, and the Shorts in `out/<playlist>/shorts/` (~25 s each to render). Check the printed loudness is about −14 LUFS and look at
+      `<output>.description.txt`, `.<language>.srt` (none with config `"subtitles": false`), `.<translation>.json`, and the Shorts in `out/<playlist>/shorts/` (~25 s each to render). Check the printed loudness is about −14 LUFS and look at
       the thumbnail. Later fixes: `--patch` (see below), never a full re-render. Look at rendered output with
       `lp.py look edits/<slug>-epN.json <m:ss> ... [--short K] [--last S]` (one sheet, `work/<slug>/epN-look.png`),
       never hand-written ffmpeg grabs; a patch render writes that sheet of what it changed by itself.

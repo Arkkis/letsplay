@@ -79,6 +79,9 @@ The episode runs: cold open → title card → intro → (recap) → main → fr
   "previously" tag, and it exits on a 0.3 s fade to black plus 0.5 s of black and silence before the cold open's whoosh.
   User: without that the two blurred together (Vice City ep2).
 - 5.4 The same location or moment never appears in both cold open/intro/recap and main: remove it from `main`.
+  Exception: when removing it leaves main jumping in and out of the moment (cuts or `pov` switches seconds apart,
+  6.10), keep main continuous through it and accept the repeat, or pick another cold open. User: the fast cuts at
+  3:48 of RE6 Osa 7 (grab cut out of main between two view switches) were confusing.
 - 5.5 Main stays chronological and never goes back inside the intro's span (no `main` range between the first intro
   range's start and the last one's end; `check` refuses them). An intro pulled forward from later in the VOD is fine
   as long as nothing main then shows a menu or cutscene the viewer has just seen.
@@ -111,6 +114,12 @@ The episode runs: cold open → title card → intro → (recap) → main → fr
 - 6.9 A minute of main with no cut, caption, zoom or banner is a flag in the script review: either something visible
   carries it (`[ACTION]`) or it goes. Cut first (4.7); check the series' retention files before keeping such a stretch,
   and don't fill it with zooms either: stacked zooms, shakes and cuts bury the moment.
+- 6.10 No cluster of cuts: two cuts (range cuts, `pov` switches, or one of each) are never less than ~8 s apart. A
+  moment shown in quick pieces leaves the viewer not knowing what happened: merge the ranges, widen or join the `pov`
+  spans, or drop the moment. Check the script for `>>`/`<<` and `|` lines close together (RE6 Osa 7, user).
+- 6.11 A death, game-over or mission-failed screen is shown only after the death or failure itself is on screen in
+  the same stretch, never alone after a cut, in a cold open or in a Short; the exception is talk over it that
+  is a payoff on its own. Without the cause the screen means nothing (RE6 Osa 7's "Mission Failed" cold open, user).
 
 ## 7. What is on screen decides (co-op and every named thing)
 
@@ -155,6 +164,18 @@ The episode runs: cold open → title card → intro → (recap) → main → fr
 - 8.2 Only the best lines, about 2 per minute at most. Overlapping captions stack automatically.
 - 8.3 Not on `[GUEST]` or `[TO GUEST]` lines (7.4, 7.5).
 - 8.4 A caption may sit in the cold open; the same line then shows there and in main.
+- 8.4b Every caption and Short cue makes sense to a viewer who sees only that frame and line: it names or reacts to what is
+  on screen right then, a joke has its setup in view, a callback has its first half in the episode. A bare exclamation
+  ("OI OI OI OI"), a remark on something not shown ("SIVIILI KUOLI" over an empty tunnel) or a line that needs the
+  series to get ("LAPPULIISA VASTAAN SUPERSOTILAS") goes. A Short starts on its setup line ("Tää alkaa viskelee näitä
+  granaatteja" before the grenades), not after it. A cue that reads as nonsense is a mishearing to fix, never to ship
+  ("vetää turvaa" was "vetää turpaan"). User, RE6 Osa 7.
+  Captions and cues hold real words: a mispronounced or mangled word is written as the word it stands for
+  ("monsteli" → "MONSTERI", in the caption and through `"wordFixes"` for the cues), even when every decode hears it as
+  said. Spoken forms stay spoken (mä, tää, ollu, tommonen, kyl). User, RE6 Osa 7.
+- 8.4c Separate recordings keep each mic on its own track in the source (OBS multitrack): decode a garbled line from
+  that speaker's track alone (faster-whisper on `-map 0:a:<mic>` for the window). Without the other voice and the game
+  under it, it settles what the mixed track can't (RE6 Osa 7: six Short cues and two captions fixed that way).
 - 8.6 Proof-read before `check`: `lp.py proof` decodes every caption's line and every Short a second time (same model,
   each window alone without stream context; Finnish fine-tunes were tried and standardise the colloquial words the
   captions need, see `LEARNINGS.md`) and flags caption words heard in neither decode and Short words the second pass
@@ -228,6 +249,8 @@ The episode runs: cold open → title card → intro → (recap) → main → fr
 - 14.4 Tags: game, mod, series, co-op partner, language, channel names.
 - 14.5 Say "stream" only when it was the user's own stream. A session recorded locally while only the partner
   streamed has no "Twitch stream" in the lower third, description or Shorts label (`"fromStream"` in the EDL).
+- 14.6 No subtitle track for Finnish: config `"subtitles": false` makes render write no `.srt` and publish upload
+  none (user, RE6 Osa 7). Short cues and on-screen captions are unaffected.
 
 ## 15. Shorts
 
