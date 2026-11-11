@@ -29,7 +29,9 @@ export const Stack: React.FC<{lines: Line[]; dur?: number; align?: 'left' | 'rig
 			transform: `rotate(${TILT}deg)`, transformOrigin: align === 'right' ? 'right top' : align === 'center' ? 'center top' : 'left top', ...style}}>
 			{lines.map((l, i) => {
 				const s = still ? 1 : spring({frame: f - 3 * i, fps, config: {damping: 16, stiffness: 170}});
-				return <div key={i} style={{...lineStyle(l), opacity: s, transform: `translateX(${dir * (1 - s) * 60}px)`}}>{l.text}</div>;
+				// umlaut dots sit above the cap height: give them room so they don't touch the line above
+				const dots = i > 0 && /[ÄÖÅÜäöåü]/.test(l.text) ? {paddingTop: l.size * 0.12} : {};
+				return <div key={i} style={{...lineStyle(l), ...dots, opacity: s, transform: `translateX(${dir * (1 - s) * 60}px)`}}>{l.text}</div>;
 			})}
 		</div>
 	);

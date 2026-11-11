@@ -66,8 +66,8 @@ The episode runs: cold open → title card → intro → (recap) → main → fr
   short hits read better than one long one. They are picked like Shorts (15.0, 15.4): the first frame shows something
   happening, the hit works with the sound off, the payoff is visible, and no inside jokes (the mod, the editing, the
   channel). The draft's candidates are a start, not the answer.
-- 5.1b Title card: 1.5 s, a stinger, not a pause. Retention: viewers left on a longer blurred card right after the
-  cold open.
+- 5.1b Title card: 2.5 s, a stinger, not a pause. At 1.5 s nobody could read it (user, 2026-11-08); retention: viewers
+  left on a 3.5 s blurred card right after the cold open.
 - 5.2 Intro: about 20 s, on screen something is happening (driving, a mission starting, an effect firing) while the
   streamer says what this is (the mod, the goal, the partner) in a sentence or two. No talk about other streams or
   past games, no mod explanation over a static shot: the rest of the explanation goes into main over action, where it

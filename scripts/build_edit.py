@@ -18,7 +18,7 @@ from scripts.config import CFG, about_partner, out_dir, text, translation_text
 
 FPS = 60
 SKIP_TRANSITION = 45  # source seconds skipped before a whoosh transition is used
-TITLE_S, LOWER_THIRD_S, CARD_S = 1.5, 5, 3.5  # TITLE_S: RULEBOOK 5.1b, viewers left on the 3.5 s card
+TITLE_S, LOWER_THIRD_S, CARD_S = 2.5, 5, 3.5  # TITLE_S: RULEBOOK 5.1b (1.5 s was too fast to read; viewers left on 3.5 s)
 CAPTION_F, ZOOM_HOLD_F, ZOOM_SPACING_F, EFFECT_SEARCH_S = 132, 110, 240, 30
 WORD_F = 7  # caption word cadence when a word can't be matched to speech
 PUNCH_SPACING_F, PUNCH_RISE_DB = 15 * FPS, 10  # audio-reactive punch-ins: at most one per 15 s, on a sharp loudness rise
@@ -102,11 +102,23 @@ def recap_file(ranges):
     """The recap's own graded source (public/<vod>-epN-recap.mp4): the ranges back to back, cut from the raw VOD,
     because the prepared episode source only holds this episode's part. Rebuilt when the ranges change."""
     name = f"{edl['vod']}-ep{edl['episode']}-recap.mp4"
-    key = hashlib.md5(json.dumps(ranges).encode()).hexdigest()[:8]
+    src, cuts, grade = f"footage/{edl['vod']}.mp4", ranges, f"{GRADE},"
+    # Separate-track streams: footage/ is only the analysis reference (plain webcam boxes), so take the previous episode's
+    # cold open from its rendered output instead (cut-outs, captions and all), when its clips are those ranges.
+    prev = f"edits/{edl['vod']}-ep{edl['episode'] - 1}.json"
+    if os.path.exists(f"work/{edl['vod']}/assemble.json") and os.path.exists(prev):
+        p = json.load(open(prev))
+        props, mp4 = f"work/{edl['vod']}/ep{p['episode']}.props.json", f"{out_dir(p)}/{p['output']}.mp4"
+        if os.path.exists(props) and os.path.exists(mp4):
+            pe = json.load(open(props))
+            cold = [c for c in pe.get("edit", pe)["clips"] if c.get("section") == "cold"]
+            if len(cold) == len(ranges) and all(abs(c["dur"] - (b - a) * FPS) <= 2 for c, (a, b) in zip(cold, ranges)):
+                src, cuts, grade = mp4, [[c["from"] / FPS, (c["from"] + c["dur"]) / FPS] for c in cold], ""
+    key = hashlib.md5(json.dumps([src, cuts]).encode()).hexdigest()[:8]
     out, tag = f"public/{name}", f"public/{name}.{key}"
     if not (os.path.exists(out) and os.path.exists(tag)):
-        inputs = [x for a, b in ranges for x in ("-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", f"footage/{edl['vod']}.mp4")]
-        graph = "".join(f"[{i}:v][{i}:a]" for i in range(len(ranges))) + f"concat=n={len(ranges)}:v=1:a=1[v0][a];[v0]{GRADE},fps={FPS}[v]"
+        inputs = [x for a, b in cuts for x in ("-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", src)]
+        graph = "".join(f"[{i}:v][{i}:a]" for i in range(len(cuts))) + f"concat=n={len(cuts)}:v=1:a=1[v0][a];[v0]{grade}fps={FPS}[v]"
         subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *inputs, "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
                         *video_encoder(), "-g", "60", "-c:a", "aac", "-b:a", "256k", out], check=True)
         for f in [f for f in os.listdir("public") if f.startswith(name + ".")]:

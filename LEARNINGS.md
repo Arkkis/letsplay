@@ -270,7 +270,42 @@ into `RULEBOOK.md` as a numbered rule and delete it here. Keep this file under ~
   later. Put the lower third where no caption falls within ~10 s of it.
 - 2026-11-08 RE6 co-op Osa 7: 16.6 min, -13.6 LUFS, 73 clips, 11 captions, 7 chapters, 5→4 pov spans, 1 cold-open hit,
   4 Shorts (9–31 s). Main render at concurrency 6 with swap pressure ~65 min.
+- 2026-11-08 GTA SA Kimppastriimi (Twitch Stream Together, separate games): Arkkis's cam 1675,700,245,380, Dexta's cam sits
+  bottom-left over the minimap. Ingest's motion used config `cam` (wrong layout): re-run `scripts/motion.py <slug> <rect>`.
+  `speakers --host 1760,850,110,70 --guest 135,910,85,45`. Dexta talks a lot about his own game: most [GUEST] lines are cut.
+- 2026-11-08 `proof`/`check` crash in thumb_plan.py (ffmpeg exit 254) while `prep` is still writing `public/<slug>-epN.mp4`:
+  wait for prep, nothing in the EDL is wrong.
+- 2026-11-08 A Short over 35 % guest talk without `"onScreen"` is dropped with only a `check` problem line, and proof's
+  text.txt silently lists one Short fewer: count the `== SHORT` blocks against the EDL.
+- 2026-11-08 Short titles starting a line with Ä/Ö had their dots touching the tag above (lineHeight 1.02): `Stack` now pads
+  such lines. A code-only change isn't seen by `--patch`: move the Short's mp4 away to force its re-render.
+- 2026-11-08 GTA SA Kimpassa Osa 1: `split --target 35` gave a 47.7 min raw part that edits to 7.3 min (menus, setup, guest
+  chatter); -14.1 LUFS, 23 clips, 7 captions, 3 chapters, 2 Shorts (20 s, 12 s). Ran in a long session after compaction.
+- 2026-11-08 GTA SA Kimpassa scheduled on Tuesdays (GTA 3 Mon, Vice City Wed, RE6 Fri): Osa 1 10.11 16:00, Shorts 10.11 and
+  12.11 17:00. Two queued Shorts moved into the free 24.11 and 26.11 instead of shifting the whole queue; Shorts on an
+  episode's own day stay put.
+- 2026-11-08 GTA 3 Co-op Osa 3: `draft` gave a bogus intro (76:48.9–106:49, the whole part) and a ~1 min main: on a
+  chat-heavy part rebuild every range by hand. The part (32 min raw: raid, chat admin, off-topic) edits to 5.3 min; that
+  is fine, padding is not.
+- 2026-11-08 Settle a proof `!!` or a garbled line by decoding the host mic alone (the webcam file; faster-whisper on CPU
+  `int8` when libcublas won't load): it heard "törmäsi johonkin" where both proof decodes were garbled. proof compares raw
+  decodes, so the `!!` stays; `--read` still stamps, and a wordFix keeps the cues in line with the caption.
+- 2026-11-08 `lp.py render` has no `--concurrency`: it uses `CONCURRENCY` (cpu_count // 2) in lp.py.
+- 2026-11-08 Ending a range where Whisper's last word end touches the next word's start leaks that word ("Mut") into
+  the cut: end the range on an earlier sentence with a real pause instead.
 
+- 2026-11-08 Thumbnail: the face cut-out covers x 37–85 % and the bottom; a subject at frame centre hides behind it
+  (Osa 3's fire truck). Push the subject bottom-left with `bgOrigin` "100% 12%" (zoom 1.3; 12 % keeps the VOD's top black
+  band out) and check the jpg, not just thumb_plan's contrast line. Ä/Ö in a second thumbnail line touched the first
+  (METSÄSSÄ): pick a word without dots or fix `Thumbnail.tsx` like the Shorts' `Stack`.
+- 2026-11-08 User on GTA 3 Co-op Osa 3's three Shorts: "we want to put only quality content, not just some leftovers."
+  A Short needs a strong picture AND a clear spoken payoff within the first seconds; when a part has none, ship zero
+  Shorts and list the candidates in `notShorts`. Never fill the quota from what's left.
+- 2026-11-08 User: send the top Short candidates first. Rank them, send the best 2–3 as rendered Shorts (not raw `footage/` cuts: plain webcam boxes) with a title idea,
+  and render only the ones the user picks (`"shorts": []` until then).
+- 2026-11-08 Separate-track streams: the recap was cut from `footage/<slug>.mp4` (analysis reference, plain webcam boxes),
+  so Osa 3's "Aiemmin" showed un-cut webcams. `build_edit.recap_file` now cuts the previous episode's cold open from its
+  rendered mp4 when assemble.json exists. A recap-source change isn't seen by `--patch`: pass `--patch 0:00-0:22`.
 ## Channel stats
 
 - YouTube numbers (views, subscribers, retention) are private: they live in `work/channel-stats.md`, which is
